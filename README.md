@@ -125,6 +125,25 @@ Altnernatively if you have a free Apple Developer account:
 - Under My Certificates, double click your Apple Development certificate.
 - Your Team ID is the string of letters and numbers next to Organizational Unit
 
+### Fixing Missing Vulcan Headers Error
+
+When running `cmake --build build/ios-vulkan --target z_generals` you may see an error referring to missing Vulcan headers. This requires the path to the header include files to be set explicity using the commands below.
+
+```
+export C_INCLUDE_PATH=$VULKAN_SDK/include
+export CPLUS_INCLUDE_PATH=$VULKAN_SDK/include
+```
+
+### Fixing Missing d3d11_4.h file not found Error
+
+When running `cmake --build build/ios-vulkan --target z_generals` you may see an error referring to a missing d3d11_4.h file. 
+
+You can check if the files are missing by running `find references/fbraz3-dxvk -name d3d11_4.h`. If nothing is returned, then this requires fixing the DXVK submodule using the commands below
+
+```
+git submodule update --init --recursive
+```
+
 ### Fixing Bundle Identifier Errors
 
 You may get a Bundle Identifier error when attemtping to run the XCode project from within XCode.
@@ -132,7 +151,32 @@ You may get a Bundle Identifier error when attemtping to run the XCode project f
 > Failed Registering Bundle Identifier
 > The app identifier "me.ammaar.generalszh" cannot be registered to your development team because it is not available. Change your bundle identifier to a unique string to try again.
 
-This can be fixed by changing the Product Bundle Identifier under `Build Settings` -> `Packaging` -> `Product Bundle Identifier` 
+This can be fixed by changing the Product Bundle Identifier under `Build Settings` -> `Signing & Capabilities` -> `Bundle Identifier` in XCode to the another value - e.g. `me.myname.generalszh`. Save t
+
+### Fixing ERROR: The specified device was not found
+
+You may see ann error when you attempt to install the app using `` 
+
+```
+ERROR: The specified device was not found.
+(Name: 13-inch)
+```
+
+This can be fixed by manually installing the app using `xcrun devicectl device install app --device "YOUR DEVICE NAME" GeneralsX/build/ios-package/GeneralsXZH.app`, where you device name can be obtained by running `xcrun xctrace list devices` (exluding the iOS version number)
+
+### Fixing this application cannot be launched errors
+
+After a number of days, if you are using a free Apple Developer account, your certificate will expire and you will need to rebuilt and re-upload the application.
+
+This can be done by executing the steps below which will re-package and sign the application, after which we will install it using `xcrun devicectl device install app --device "YOUR DEVICE NAME" GeneralsX/build/ios-package/GeneralsXZH.app`
+
+```
+GX_TEAM_ID=<your-team-id> GX_BUNDLE_ID=com.you.generalszh \
+    ./scripts/build/ios/package-ios-zh.sh
+xcrun devicectl device install app --device "YOUR DEVICE NAME" GeneralsX/build/ios-package/GeneralsXZH.app
+```
+
+
 
 ## Where things are
 
