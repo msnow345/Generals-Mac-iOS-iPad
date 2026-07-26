@@ -151,11 +151,11 @@ You may get a Bundle Identifier error when attemtping to run the XCode project f
 > Failed Registering Bundle Identifier
 > The app identifier "me.ammaar.generalszh" cannot be registered to your development team because it is not available. Change your bundle identifier to a unique string to try again.
 
-This can be fixed by changing the Product Bundle Identifier under `Build Settings` -> `Signing & Capabilities` -> `Bundle Identifier` in XCode to the another value - e.g. `me.myname.generalszh`. Save t
+This can be fixed by changing the Product Bundle Identifier under `Build Settings` -> `Signing & Capabilities` -> `Bundle Identifier` in XCode to the another value - e.g. `me.myname.generalszh`. Save the project but do not attempt to run and deploy the app from XCode at this stage.
 
 ### Fixing ERROR: The specified device was not found
 
-You may see ann error when you attempt to install the app using `` 
+You may see ann error when you attempt to install the app using `./scripts/build/ios/package-ios-zh.sh --install` 
 
 ```
 ERROR: The specified device was not found.
