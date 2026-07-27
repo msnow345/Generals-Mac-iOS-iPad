@@ -155,7 +155,7 @@ This can be fixed by changing the Product Bundle Identifier under `Build Setting
 
 ### Fixing ERROR: The specified device was not found
 
-You may see ann error when you attempt to install the app using `./scripts/build/ios/package-ios-zh.sh --install` 
+You may see ann error when you attempt to install the app using `/scripts/build/ios/package-ios-zh.sh --install` 
 
 ```
 ERROR: The specified device was not found.
