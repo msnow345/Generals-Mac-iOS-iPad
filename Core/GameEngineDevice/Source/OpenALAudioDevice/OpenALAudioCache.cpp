@@ -118,6 +118,17 @@ ALuint OpenALAudioFileCache::getBufferForFile(const OpenFileInfo &fileInfo)
 		}
 	}
 
+	// GeneralsX @bugfix Marco 24/08/2026 Bail out early when there is no filename
+	// to load. Some stock audio events ship with an empty "Sounds =" list -
+	// TurretMoveLoop and RadarEvent among them. TurretMoveLoop is declared
+	// "loop all random", so startNextLoop() regenerates the (empty) filename and
+	// lands here again every frame, each time walking all the way down to
+	// TheFileSystem->openFile("") before failing. Nothing was leaked, but the
+	// lookup and the BIG-archive access were pure waste, several times a second.
+	if (strToFind.isEmpty()) {
+		return 0;
+	}
+
 	auto it = m_openFiles.find(strToFind);
 
 	if (it != m_openFiles.end()) {
