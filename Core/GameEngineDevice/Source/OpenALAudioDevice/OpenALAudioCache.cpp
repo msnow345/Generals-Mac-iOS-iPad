@@ -132,8 +132,6 @@ ALuint OpenALAudioFileCache::getBufferForFile(const OpenFileInfo &fileInfo)
 		return 0;
 	}
 
-	UnsignedInt fileSize = file->size();
-
 	OpenAudioFile openedAudioFile;
 	alGenBuffers(1, &openedAudioFile.m_buffer);
 	openedAudioFile.m_eventInfo = eventToOpenFrom ? eventToOpenFrom->getAudioEventInfo() : NULL;
@@ -160,7 +158,12 @@ ALuint OpenALAudioFileCache::getBufferForFile(const OpenFileInfo &fileInfo)
 
 	openedAudioFile.m_ffmpegFile->close();
 
-	openedAudioFile.m_fileSize = fileSize;
+	// GeneralsX @bugfix Marco 24/08/2026 Account for the DECODED PCM size, not the
+	// compressed file size. decodeFFmpeg() accumulates m_fileSize per frame; assigning
+	// file->size() here overwrote it with a far smaller value, so the cache
+	// under-reported its real footprint and evicted much later than intended.
+	// (This is not what caused the buffer leak - see releaseOpenAudioFile - but
+	// the accounting was wrong regardless.)
 	m_currentlyUsedSize += openedAudioFile.m_fileSize;
 	if (m_currentlyUsedSize > m_maxSize) {
 		DEBUG_LOG(("Audio Cache is full, trying to free some space\n"));
