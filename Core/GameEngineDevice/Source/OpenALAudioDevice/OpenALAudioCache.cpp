@@ -224,7 +224,13 @@ void OpenALAudioFileCache::setMaxSize(UnsignedInt size)
 //-------------------------------------------------------------------------------------------------
 void OpenALAudioFileCache::releaseOpenAudioFile(OpenAudioFile* fileToRelease)
 {
-	if (fileToRelease->m_openCount > 0) {
+	// GeneralsX @bugfix Marco 24/08/2026 Always detach the buffer from any source
+	// still referencing it - not just when m_openCount > 0. The cache reference is
+	// dropped (closeBuffer) before the source gets a new buffer assigned, so a
+	// buffer with m_openCount == 0 can still be bound to a live OpenAL source.
+	// alDeleteBuffers then fails with AL_INVALID_OPERATION and the buffer leaks;
+	// measured: 1158 of 1158 deletions failed, ~26 MB/min lost.
+	if (fileToRelease->m_buffer) {
 		// This thing needs to be terminated IMMEDIATELY.
 		TheAudio->closeAnySamplesUsingFile((const void*)(uintptr_t)fileToRelease->m_buffer);
 	}
