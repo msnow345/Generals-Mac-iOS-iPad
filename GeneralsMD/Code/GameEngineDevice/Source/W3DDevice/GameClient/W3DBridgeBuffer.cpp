@@ -739,6 +739,9 @@ W3DBridgeBuffer::W3DBridgeBuffer()
 	m_bridgeTexture = nullptr;
 	m_curNumBridgeVertices=0;
 	m_curNumBridgeIndices=0;
+	// GeneralsX @bugfix Claude 31/08/2026 clearAllBridges() loops [0, m_numBridges) releasing each
+	// entry, so it must not run against an uninitialized count.
+	m_numBridges = 0;
 	clearAllBridges();
 	allocateBridgeBuffers();
 	m_initialized = true;

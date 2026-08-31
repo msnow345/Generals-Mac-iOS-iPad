@@ -1030,11 +1030,21 @@ void ShaderClass::Apply()
 	DX8Wrapper::Set_DX8_Render_State(D3DRS_CULLMODE,Get_Cull_Mode() ? _PolygonCullMode : D3DCULL_NONE);
 
 	// NPATCHES
+	// GeneralsX @bugfix Claude 31/08/2026 N-patch tessellation (ATI TruForm, 2002) is not
+	// implemented by DXVK's D3D8 layer -- it drops D3DRS_PATCHSEGMENTS and logs
+	// "Unimplemented render state" for every SetRenderState. End_Scene() invalidates the
+	// cached render states each frame while pillarbox is active, so the cache in
+	// Set_DX8_Render_State cannot absorb it and the warn recurs every frame (~72k lines
+	// per 12-minute session measured on Android). The state can only do anything against
+	// a real D3D8 driver, which in this project means Windows (SAGE_USE_DX8); every other
+	// target goes through DXVK. No visual change: tessellation never activated there.
+#ifdef _WIN32
 	if (diff&ShaderClass::MASK_NPATCHENABLE) {
 		float level=1.0f;
 		if (Get_NPatch_Enable()) level=float(WW3D::Get_NPatches_Level());
 		DX8Wrapper::Set_DX8_Render_State(D3DRS_PATCHSEGMENTS,*((DWORD*)&level));
 	}
+#endif
 
 	// Enable/disable alpha test
 	DX8Wrapper::Set_DX8_Render_State(D3DRS_ALPHATESTENABLE,BOOL(Get_Alpha_Test()));

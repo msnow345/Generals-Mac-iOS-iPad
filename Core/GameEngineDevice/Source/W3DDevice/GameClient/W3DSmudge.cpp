@@ -44,7 +44,19 @@
 
 SmudgeManager *TheSmudgeManager=nullptr;
 
-W3DSmudgeManager::W3DSmudgeManager()
+// GeneralsX @bugfix Claude 31/08/2026 Zero-initialize every member.
+// init() -> ReAcquireResources() -> ReleaseResources() runs REF_PTR_RELEASE on
+// m_backgroundTexture/m_indexBuffer on the very first init, i.e. before anything ever
+// assigns them. Members are listed in declaration order.
+W3DSmudgeManager::W3DSmudgeManager() :
+	m_smudgeGroup(nullptr),
+	m_posBuffer(nullptr),
+	m_RGBABuffer(nullptr),
+	m_sizeBuffer(nullptr),
+	m_backgroundTexture(nullptr),
+	m_indexBuffer(nullptr),
+	m_backBufferWidth(0),
+	m_backBufferHeight(0)
 {
 }
 
@@ -81,6 +93,13 @@ void W3DSmudgeManager::ReAcquireResources()
 	ReleaseResources();
 
 	SurfaceClass *surface=DX8Wrapper::_Get_DX8_Back_Buffer();
+	// GeneralsX @bugfix Claude 31/08/2026 _Get_DX8_Back_Buffer() legitimately returns null when
+	// no back buffer is available. Leave the resources null and bail: render() already
+	// checks m_backgroundTexture and skips the heat-haze pass, so the effect degrades
+	// instead of dereferencing null here.
+	if (surface == nullptr) {
+		return;
+	}
 	SurfaceClass::SurfaceDescription surface_desc;
 
 	surface->Get_Description(surface_desc);

@@ -164,6 +164,24 @@ bool DX8Wrapper::Pillarbox_Setup(int gameW, int gameH)
 	int bbH = (int)_PresentParameters.BackBufferHeight;
 	float density = 1.0f;
 
+	// GeneralsX @bugfix Claude 31/08/2026 Query the window pixel density unconditionally.
+	// density was only ever written by the GetWindowSize/GetNativeDisplaySize fallbacks
+	// below, which are skipped whenever the present parameters already carry a valid
+	// backbuffer size — so on a high-DPI window (iOS sets SDL_WINDOW_HIGH_PIXEL_DENSITY)
+	// it kept its 1.0 initializer. Pillarbox_Get_Rect then reported the fit rect in
+	// backbuffer pixels instead of window points, which made
+	// SDL3Mouse::scaleMouseCoordinates() collapse to rawX * gameW/gameW == rawX. Every
+	// mouse/touch position was consumed as points where the game expected pixels, i.e.
+	// at 1/density of its true position (~58% on a 1.72x iPad), so nothing was ever
+	// under the cursor and touch input appeared completely dead.
+	{
+		int winW = 0, winH = 0;
+		float winDensity = 1.0f;
+		if (GetWindowSize(winW, winH, winDensity) && winDensity > 0.0f) {
+			density = winDensity;
+		}
+	}
+
 	if (bbW <= 0 || bbH <= 0) {
 		if (!GetWindowSize(bbW, bbH, density)) {
 			if (!GetNativeDisplaySize(bbW, bbH, density)) {
@@ -3519,7 +3537,10 @@ SurfaceClass * DX8Wrapper::_Get_DX8_Back_Buffer(unsigned int num)
 {
 	DX8_THREAD_ASSERT();
 
-	IDirect3DSurface8 * bb;
+	// GeneralsX @bugfix Claude 31/08/2026 DXVK can return D3D_OK without writing ppBackBuffer
+	// (e.g. the swapchain has no back buffer yet), leaving bb as stack garbage that then
+	// passes the `if (bb)` test and gets wrapped as a valid surface.
+	IDirect3DSurface8 * bb = nullptr;
 	SurfaceClass *surf=nullptr;
 	DX8CALL(GetBackBuffer(num,D3DBACKBUFFER_TYPE_MONO,&bb));
 	if (bb)

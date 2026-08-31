@@ -4026,7 +4026,12 @@ void PathfindLayer::classifyWallMapCell( Int i, Int j , PathfindCell *cell, Obje
 
 //----------------------- Pathfinder ---------------------------------------
 
-Pathfinder::Pathfinder() :m_map(nullptr)
+// GeneralsX @bugfix Claude 31/08/2026 Initialize m_blockOfMapCells before reset().
+// reset() does an unconditional `delete [] m_blockOfMapCells` before nulling it, so a
+// non-zeroed allocation makes construction free a garbage pointer. Desktop/iOS survive
+// only because their allocators happen to hand back zeroed pages here; Android's Bionic
+// (dirty malloc) faults. Declaration order is m_blockOfMapCells then m_map.
+Pathfinder::Pathfinder() : m_blockOfMapCells(nullptr), m_map(nullptr)
 {
 	debugPath = nullptr;
 	PathfindCellInfo::allocateCellInfos();
