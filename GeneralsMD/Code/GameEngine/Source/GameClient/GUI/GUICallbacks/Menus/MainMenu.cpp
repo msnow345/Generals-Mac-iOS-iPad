@@ -361,6 +361,16 @@ static void TimetToFileTime( time_t t, LPFILETIME pft )
 void initialHide()
 {
 GameWindow *win = nullptr;
+	// GeneralsX @tweak Claude 31/08/2026 Hide the orphaned Custom Mission button.
+	// MainMenu.wnd (from the 1.04 patch data) defines ButtonCustomMission as ENABLED, but
+	// its label GUI:CustomMission has no entry in the shipped string table, so GameText
+	// falls back to rendering "MISSING: 'GUI:CustomMission'" (GameText.cpp) right in the
+	// single-player panel. Nothing in the engine drives the button either -- the feature it
+	// belonged to was never shipped -- so hide it rather than leave a dead control that
+	// advertises a missing string.
+	win = TheWindowManager->winGetWindowFromId(parentMainMenu, TheNameKeyGenerator->nameToKey("MainMenu.wnd:ButtonCustomMission"));
+	if(win)
+		win->winHide(TRUE);
 	win = TheWindowManager->winGetWindowFromId(parentMainMenu, TheNameKeyGenerator->nameToKey("MainMenu.wnd:WinFactionGLA"));
 	if(win)
 		win->winHide(TRUE);

@@ -54,6 +54,11 @@ void GX_StopPanGlide();
 // cursor stops moving the moment the last finger lifts -- so without this the scroll runs
 // away forever whenever a gesture ends inside the edge band.
 void GX_SetTouchActive(Bool active);
+
+// GeneralsX @tweak Claude 31/08/2026 Accumulate a continuous pinch-zoom factor.
+// Applied on the next frame tick, anchored so the ground between the fingers stays put.
+// Ratios multiply, so several gesture updates inside one frame compose correctly.
+void GX_AccumulateTouchZoom(Real ratio);
 #endif
 
 class LookAtTranslator : public GameMessageTranslator

@@ -40,6 +40,8 @@
 #include "GameClient/InGameUI.h"
 #include "SDL3Device/GameClient/TouchHaptics.h"
 #include "GameClient/LookAtXlat.h"
+#include "Common/GameState.h"
+#include "GameLogic/GameLogic.h"
 #include "W3DDevice/GameLogic/W3DGameLogic.h"
 #include "W3DDevice/GameClient/W3DGameClient.h"
 #include "W3DDevice/Common/W3DModuleFactory.h"
@@ -97,10 +99,47 @@ static inline bool iosShouldPauseRendering()
 	return s_appBackgrounded.load() || s_appInactive.load();
 }
 
+// GeneralsX @feature Claude 31/08/2026 Save the mission when iOS suspends the app.
+// A suspended iOS app can be terminated at any moment with no further code execution and no
+// warning to the player -- long sessions on iPad are routinely memory-killed, which is a
+// documented issue for this port. WILL_ENTER_BACKGROUND is the last point the process is
+// guaranteed to run, so the mission is written there.
+//
+// A fixed filename keeps this to a single slot rather than accumulating one save per
+// suspend, and keeps it clear of the player's own numbered saves. It shows up in Load Game
+// like any other save.
+static void iosSaveOnBackground()
+{
+	if (TheGameState == nullptr || TheGameLogic == nullptr) {
+		return;
+	}
+	// Only a live single-player mission is worth saving, and can be: the shell has no game
+	// state, and the engine does not support saving multiplayer.
+	if (!TheGameLogic->isInGame() || TheGameLogic->isInShellGame()) {
+		return;
+	}
+	if (TheGameLogic->isInMultiplayerGame()) {
+		return;
+	}
+	// Never serialise from inside a logic update. This watcher fires on whichever pump
+	// delivered the event, which is not guaranteed to be a frame boundary.
+	if (TheGameLogic->isInGameLogicUpdate()) {
+		return;
+	}
+
+	TheGameState->saveGame(AsciiString("iOSSuspendSave.sav"),
+	                       UnicodeString(L"Auto-Save (app suspended)"),
+	                       SAVE_FILE_TYPE_NORMAL);
+}
+
 static bool SDLCALL iosLifecycleWatcher(void *userdata, SDL_Event *event)
 {
 	switch (event->type) {
 		case SDL_EVENT_WILL_ENTER_BACKGROUND:
+			// Last guaranteed chance to run before suspension.
+			iosSaveOnBackground();
+			s_appBackgrounded.store(true);
+			break;
 		case SDL_EVENT_DID_ENTER_BACKGROUND:
 			s_appBackgrounded.store(true);
 			break;
@@ -179,7 +218,6 @@ TouchState s_touch;
 
 const Uint64 LONG_PRESS_MS = 600;
 // GeneralsX @bugfix Codex 09/07/2026 Lock two-finger gestures and scale touch thresholds to physical display density.
-const float PINCH_STEP_RATIO = 0.03f;       // 3% distance change per wheel tick
 const float MIN_TOUCH_DEAD_ZONE_PX = 8.0f;  // low-density floor for tap/pan/pinch jitter
 const float TOUCH_DEAD_ZONE_MM = 3.0f;
 const float SDL_BASE_POINTS_PER_MM = 160.0f / 25.4f;
@@ -334,20 +372,24 @@ void beginTwoFingerPending(int winW, int winH)
 	s_touch.phase = TouchState::TWO_PENDING;
 }
 
+// GeneralsX @tweak Claude 31/08/2026 Continuous pinch zoom.
+// This used to emit a mouse-wheel tick per 3% of finger travel, which ratchets the camera in
+// fixed steps about the screen centre -- the one obviously non-native thing left once the
+// pan became 1:1. The distance ratio is now passed through whole, and the cursor is parked
+// on the pinch centre so the engine can anchor the zoom there (see GX_AccumulateTouchZoom).
 void handlePinch(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
 {
 	const float dist = getFingerDistance(winW, winH);
-	if (s_touch.pinchDist > 1.0f) {
+	if (s_touch.pinchDist > 1.0f && dist > 1.0f) {
 		const float ratio = dist / s_touch.pinchDist;
-		const float cx = getCentroidX(winW);
-		const float cy = getCentroidY(winH);
-		if (ratio > 1.0f + PINCH_STEP_RATIO) {
-			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_WHEEL, cx, cy, 0, 1.0f);
-			s_touch.pinchDist = dist;
-		} else if (ratio < 1.0f - PINCH_STEP_RATIO) {
-			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_WHEEL, cx, cy, 0, -1.0f);
-			s_touch.pinchDist = dist;
-		}
+		s_touch.pinchDist = dist;
+
+		// Put the cursor between the fingers first: the engine anchors the zoom on the
+		// ground under the cursor, and this message is processed before the frame tick that
+		// consumes the ratio.
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION,
+		                   getCentroidX(winW), getCentroidY(winH));
+		GX_AccumulateTouchZoom((Real)ratio);
 	}
 }
 

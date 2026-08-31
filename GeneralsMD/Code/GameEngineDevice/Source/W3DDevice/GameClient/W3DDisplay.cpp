@@ -3075,8 +3075,25 @@ VideoBuffer*	W3DDisplay::createVideoBuffer()
 		}
 		else
 		{
+#ifndef _WIN32
+			// GeneralsX @bugfix Claude 31/08/2026 Fall back instead of refusing to play video.
+			//
+			// Under DXVK the texture-format caps table comes back entirely empty -- every
+			// Support_Texture_Format() query returns false, including X8R8G8B8. Ordinary
+			// textures load fine because nothing else consults that table; video is the only
+			// caller, so the effect was that no video played anywhere at all (the EA logo,
+			// mission cinematics, unit cameos, load screens) with no error, because
+			// Display::playLogoMovie just returns when createVideoBuffer() gives back null.
+			//
+			// The backbuffer itself is a 32-bit format here, so assuming X8R8G8B8 is safe:
+			// if the texture really cannot be created, W3DVideoBuffer::allocate() still fails
+			// and the caller degrades exactly as before. Windows keeps the strict behaviour,
+			// where the caps table is populated and a genuine refusal means something.
+			format = VideoBuffer::TYPE_X8R8G8B8;
+#else
 			// card does not support any of the formats we need
 			return nullptr;
+#endif
 		}
 	}
 	// on low mem machines, render every video in 16bit

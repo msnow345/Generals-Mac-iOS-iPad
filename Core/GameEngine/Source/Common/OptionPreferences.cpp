@@ -36,6 +36,9 @@
 #include "Common/GameLOD.h"
 #include "Common/GlobalData.h"
 #include "Common/OptionPreferences.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "GameClient/ClientInstance.h"
 #include "GameClient/LookAtXlat.h"
@@ -797,7 +800,17 @@ Int OptionPreferences::getRenderFpsFontSize()
 {
 	OptionPreferences::const_iterator it = find("RenderFpsFontSize");
 	if (it == end())
+	{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+		// GeneralsX @tweak Claude 31/08/2026 Default this HUD readout off on touch.
+		// It is screen furniture on a tablet, and unlike desktop there is no console or
+		// convenient options file to switch it off from. An explicit RenderFpsFontSize in
+		// Options.ini still wins, so anyone who wants it can turn it back on.
+		return 0;
+#else
 		return 8;
+#endif
+	}
 
 	Int fontSize = atoi(it->second.str());
 	if (fontSize < 0)
@@ -811,7 +824,17 @@ Int OptionPreferences::getSystemTimeFontSize()
 {
 	OptionPreferences::const_iterator it = find("SystemTimeFontSize");
 	if (it == end())
+	{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+		// GeneralsX @tweak Claude 31/08/2026 Default this HUD readout off on touch.
+		// It is screen furniture on a tablet, and unlike desktop there is no console or
+		// convenient options file to switch it off from. An explicit SystemTimeFontSize in
+		// Options.ini still wins, so anyone who wants it can turn it back on.
+		return 0;
+#else
 		return 8;
+#endif
+	}
 
 	Int fontSize = atoi(it->second.str());
 	if (fontSize < 0)

@@ -46,7 +46,10 @@
 ///////////////////////////////////////////////////////////////////////////////
 
 // SYSTEM INCLUDES ////////////////////////////////////////////////////////////
-#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+#include "PreRTS.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif	// This must go first in EVERY cpp file in the GameEngine
 
 // USER INCLUDES //////////////////////////////////////////////////////////////
 #include "Common/MessageStream.h"
@@ -212,6 +215,17 @@ GameMessageDisposition WindowTranslator::translateGameMessage(const GameMessage 
 		// ------------------------------------------------------------------------
 		case GameMessage::MSG_RAW_MOUSE_LEFT_BUTTON_UP:
 		{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// GeneralsX @feature Claude 31/08/2026 Tap to skip a movie.
+			// Movies are otherwise only escapable with the ESC key, which a touch device does
+			// not have, so an intro or cinematic would have to be sat through in full.
+			if( TheDisplay && TheDisplay->isMoviePlaying()
+					&& TheGlobalData->m_allowExitOutOfMovies == TRUE )
+			{
+				TheDisplay->stopMovie();
+				return DESTROY_MESSAGE;
+			}
+#endif
 			if( TheInGameUI && TheInGameUI->isPlacementAnchored() )
 			{
 				//If we release the button outside

@@ -30,7 +30,10 @@
 // SYSTEM INCLUDES ////////////////////////////////////////////////////////////
 #include <stdexcept>
 #include <cstdio>
-#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+#include "PreRTS.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif	// This must go first in EVERY cpp file in the GameEngine
 #include "GameClient/GameClient.h"
 
 // USER INCLUDES //////////////////////////////////////////////////////////////
@@ -530,6 +533,11 @@ void GameClient::update()
 	// We need to show the movie first.
 	if(TheGlobalData->m_playIntro && !TheDisplay->isMoviePlaying())
 	{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+		// GeneralsX @feature Claude 31/08/2026 The logo is normally unskippable; on touch there is
+		// no ESC key, so without this it could not be dismissed at all.
+		TheWritableGlobalData->m_allowExitOutOfMovies = TRUE;
+#endif
 		if(TheGameLODManager && TheGameLODManager->didMemPass())
 			TheDisplay->playLogoMovie("EALogoMovie", 5000, 3000);
 		else

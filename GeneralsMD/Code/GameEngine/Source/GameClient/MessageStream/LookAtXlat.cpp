@@ -121,6 +121,40 @@ void GX_StopPanGlide()
 
 static Bool s_touchActive = false;
 
+// GeneralsX @tweak Claude 31/08/2026 Continuous pinch zoom.
+// The stock wheel path ratchets the camera in fixed steps about the screen centre. Native
+// pinch does neither: it tracks the fingers exactly and keeps the point between them
+// pinned. Zoom is therefore accumulated as a ratio here and applied on the frame tick.
+//
+// The anchor correction is computed analytically, in the same frame as the zoom.
+//
+// The obvious approach -- re-project the pinch point after zooming and undo the difference --
+// cannot work here: screenToTerrain goes through m_3DCamera, which is only rebuilt during
+// the view's own update, so an immediate re-projection still sees the pre-zoom camera. Doing
+// it a frame later does correct the position, but then every frame displays the uncorrected
+// zoom before being yanked back on the next one, which reads as wobble.
+//
+// Instead, note that changing only the camera height scales the ground footprint about the
+// look-at point, which is what the screen centre projects to. So if the pinch point sits at
+// world offset D from the centre and the height scales by 1/r, that ground point moves to
+// D/r, and holding it under the fingers means moving the camera by D * (1 - 1/r). Both
+// projections are taken before the zoom, with the camera that is actually current.
+static Real s_pendingZoomRatio = 1.0f;
+
+static Bool gxTerrainHit(const Coord3D &c)
+{
+	// screenToTerrain leaves its output all-zero when the pick ray misses the terrain.
+	return !(c.x == 0.0f && c.y == 0.0f && c.z == 0.0f);
+}
+
+void GX_AccumulateTouchZoom(Real ratio)
+{
+	if (ratio > 0.0f)
+	{
+		s_pendingZoomRatio *= ratio;
+	}
+}
+
 void GX_SetTouchActive(Bool active)
 {
 	s_touchActive = active;
@@ -532,6 +566,49 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 			Coord2D offset = {0, 0};
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// GeneralsX @tweak Claude 31/08/2026 Settle the previous pinch step, then apply the
+			// next one. Order matters: the correction has to happen while it still refers to
+			// the camera the anchor was captured against.
+			if (s_pendingZoomRatio != 1.0f)
+			{
+				const Real ratio = s_pendingZoomRatio;
+				s_pendingZoomRatio = 1.0f;
+
+				// Both projections use the current camera, before anything moves.
+				ICoord2D centreScreen;
+				centreScreen.x = (Int)(TheDisplay->getWidth() / 2);
+				centreScreen.y = (Int)(TheDisplay->getHeight() / 2);
+
+				Coord3D anchorWorld, centreWorld;
+				anchorWorld.zero();
+				centreWorld.zero();
+				TheTacticalView->screenToTerrain(&m_currentPos, &anchorWorld);
+				TheTacticalView->screenToTerrain(&centreScreen, &centreWorld);
+				const Bool canAnchor = gxTerrainHit(anchorWorld) && gxTerrainHit(centreWorld);
+
+				// Fingers apart (ratio > 1) means zoom in, i.e. a lower camera. View::zoom
+				// takes a height delta, so scaling height by 1/ratio keeps the gesture
+				// proportional at every zoom level instead of stepping.
+				const Real heightBefore = TheTacticalView->getHeightAboveGround();
+				TheTacticalView->userZoom(heightBefore * (1.0f / ratio - 1.0f));
+				const Real heightAfter = TheTacticalView->getHeightAboveGround();
+
+				// Use the ratio actually achieved, not the one requested: the engine clamps
+				// height at its zoom limits, and correcting for a zoom that did not happen
+				// would drag the map sideways at the ends of the range.
+				if (canAnchor && heightAfter > 0.0f)
+				{
+					const Real achieved = heightBefore / heightAfter;
+					if (achieved > 0.0f)
+					{
+						Coord2D shift;
+						shift.x = (anchorWorld.x - centreWorld.x) * (1.0f - 1.0f / achieved);
+						shift.y = (anchorWorld.y - centreWorld.y) * (1.0f - 1.0f / achieved);
+						TheTacticalView->userScrollByWorld(&shift);
+					}
+				}
+			}
+
 			// GeneralsX @bugfix Claude 31/08/2026 Stop a scroll that can no longer be valid.
 			//
 			// Every scroll on touch is driven by fingers, so none of them can legitimately
