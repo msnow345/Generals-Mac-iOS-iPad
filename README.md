@@ -1,12 +1,117 @@
 # Command & Conquer Generals: Zero Hour — macOS, iOS & iPadOS
 
+## About this fork
+
+This fork builds on [ammaarreshi/Generals-Mac-iOS-iPad](https://github.com/ammaarreshi/Generals-Mac-iOS-iPad),
+which did the hard work of getting Zero Hour running on iOS at all. Everything in this section
+is new here; the rest of this README describes the port it was forked from.
+
+The theme is making the iPad version behave like a **native iOS app** rather than a desktop
+RTS being poked with a finger — plus a set of engine fixes found along the way, several of
+which affect macOS and Linux too.
+
+### Touch input actually worked out to the wrong place
+
+The first fix was not a feature. `DX8Wrapper::Pillarbox_Setup()` never populated its pixel
+density value, because the only code that assigns it sits inside a fallback branch that does
+not run when the present parameters are already valid. `Pillarbox_Get_Rect()` therefore
+reported the viewport in backbuffer **pixels** instead of window **points**, and the
+mouse-coordinate scaling collapsed to an identity mapping.
+
+Every touch landed at roughly **58% of where your finger actually was**, so nothing was ever
+under the cursor. It reads as "touch is completely broken" rather than as an offset, and it is
+invisible on desktop, where windows are not high-DPI and the density of 1.0 happens to be
+correct.
+
+### The camera moves the map, not the view
+
+- **1:1 direct manipulation.** The patch of ground under your fingers stays under your
+  fingers. Each frame the cursor's previous and current positions are projected onto the
+  terrain and the view shifts by the world-space difference, so it is correct at any zoom and
+  under Zero Hour's tilted camera — where a pixel of vertical drag covers noticeably more
+  ground than a horizontal one. This replaced the engine's right-drag scrolling, which is a
+  *joystick*: it scrolls every frame at a speed set by the cursor's distance from where the
+  button went down, and under a finger that reads as the camera accelerating away from you.
+- **Inertia.** A flick coasts and decays at `0.998`/millisecond — UIScrollView's normal
+  deceleration rate — and a touch catches it. Release velocity is measured over a real 60ms
+  window from timestamped samples rather than a per-frame filter, because a filter lags and
+  people ease off as they lift, which makes a genuine flick read as a stop. Coast length is
+  linear in release speed with no threshold cliff, so a gentle drag ends with a small drift.
+- **Pinch zoom is continuous and anchored** between your fingers. It previously emitted a
+  mouse-wheel tick per 3% of finger travel, ratcheting the camera about the screen centre.
+- **Pan and zoom work together.** The engine locked the gesture to whichever moved further
+  first, so you could not pinch mid-drag without lifting. Zoom now has to out-pace the pan to
+  engage, which stops a two-finger pan leaking zoom.
+- **A new world-space scroll primitive** (`View::scrollByWorld`) sits underneath all of this.
+  `scrollBy()` looks like it takes a world delta but does not — `W3DView` reinterprets it as
+  device-space pixels on the unit-depth view plane, with an inverted Y axis.
+
+### Placing buildings
+
+Re-mapped onto the engine's own press-anchor-release model, so its placement arrow, wall-run
+preview and validation all still work unchanged:
+
+| Gesture | Result |
+| --- | --- |
+| Drag one finger | Carry the structure under your finger |
+| Carry toward a screen edge | Map scrolls; the structure stays under your finger |
+| Tap a second finger | Rotation on — aim with the carrying finger |
+| Tap it again | Rotation off |
+| Hold it (1.2s) | Cancel the build |
+| Lift | Place it |
+
+The ghost now appears in the middle of the view rather than wherever you last tapped (with a
+mouse the pointer is already over the map; touch has no hover, so it used to appear under the
+command bar). Rotation ignores the first ~10mm, because at the moment it engages your finger
+is sitting exactly on the anchor and the facing would spin on sub-millimetre movement.
+
+### Menus and lists
+
+- **Lists and dropdowns scroll by dragging them**, pixel-accurately, and a tap still selects.
+  Previously only the scrollbar thumb worked, which is a few pixels wide at this resolution.
+- **Tap to skip movies.** They were escapable only with the ESC key, which an iPad does not
+  have, so any cinematic had to be sat through in full.
+
+### Frame rate
+
+In-game rendering now runs at up to **120fps** instead of the 30fps cap in the 2003
+`GameData.ini`, with game logic decoupled and held at 30Hz so simulation speed is unchanged.
+Raising the cap alone causes the classic Generals speed-up, because logic otherwise ticks once
+per rendered frame; the two have to change together. The cap is re-asserted per frame, since
+`GlobalData` is re-parsed from INI on every map load and silently restores it otherwise.
+
+Menu transitions and window slide animations are paced at 30Hz. They advance one step per
+*call*, once per rendered frame, so uncapping made them run at four times speed.
+
+### Engine fixes
+
+- **No video played anywhere under DXVK** — the EA logo, mission cinematics, unit cameos, load
+  screens and the score screen. `DX8Caps::Support_Texture_Format()` reports every format
+  unsupported because its caps table is never populated, so `createVideoBuffer()` returned
+  null and both `playLogoMovie()` and `playMovie()` silently returned. Ordinary textures were
+  unaffected, which is why it looked like the intro had been deliberately removed. Affects
+  macOS and Linux equally.
+- **Four uninitialised-memory bugs**, reported by the [Android port](https://github.com/fadi-labib/Generals-Android)
+  and verified here: `Pathfinder` freeing an indeterminate pointer during construction,
+  `W3DBridgeBuffer` looping over an uninitialised count, `W3DSmudgeManager` releasing
+  never-initialised members on its *first* init, and `_Get_DX8_Back_Buffer` wrapping a garbage
+  stack pointer when DXVK returns success with no surface. Platform-neutral; desktop survives
+  them only because its allocator tends to hand back zeroed pages.
+- **N-patch tessellation state guarded to Windows.** DXVK does not implement
+  `D3DRS_PATCHSEGMENTS` and logs a warning every time it is set — tens of thousands of lines
+  per session, since the render-state cache is invalidated each frame while pillarboxed.
+- **Auto-save when iOS suspends the app**, so a memory kill during a long session is no longer
+  silent data loss.
+- **Hidden the orphaned Custom Mission button**, which rendered as
+  `MISSING: 'GUI:CustomMission'` — the 1.04 patch data defines the button but ships no string
+  for it, and nothing in the engine drives it.
+- **FPS counter and clock default off** on touch, where there is no convenient options file.
+
 <img width="500" height="281" alt="IMG_3457_500" src="https://github.com/user-attachments/assets/aeaf6692-36e6-40c8-b9f8-8066d014ec4b" />
 
 **Zero Hour running natively on Apple Silicon Macs, iPhone, and iPad** — campaign,
-skirmish, and Generals Challenge, with [touch controls built for RTS](#touch-controls):
-the map moves 1:1 under your fingers and coasts when you flick it, buildings are
-carried into place and rotated with a second finger, plus tap-select, drag-box,
-long-press deselect and pinch zoom. No emulation: this
+skirmish, and Generals Challenge, with touch controls built for RTS (tap-select,
+drag-box, long-press deselect, two-finger scroll, pinch zoom). No emulation: this
 is the real 2003 engine compiled for ARM64, rendering DirectX 8 →
 [DXVK](https://github.com/doitsujin/dxvk) → Vulkan →
 [MoltenVK](https://github.com/KhronosGroup/MoltenVK) → Metal.
@@ -20,118 +125,6 @@ what. The original GeneralsX README lives on the `upstream-main` branch.
 
 **No game assets are included or distributed.** You need your own copy
 ([Steam](https://store.steampowered.com/app/2732960/), ~$5 on sale).
-
-## Touch controls
-
-An RTS designed for a mouse gives you a pointer that hovers, two buttons, and a scroll
-wheel. A touchscreen gives you none of those. Rather than paint a virtual mouse on the
-screen, the touch layer here is built around **direct manipulation** — you move the map,
-you carry the building, and the engine is told about it in the only language it speaks.
-
-Every mouse event the game receives on iOS is synthesised from touch in
-[`SDL3GameEngine.cpp`](GeneralsMD/Code/GameEngineDevice/Source/SDL3GameEngine.cpp); SDL's
-own touch→mouse synthesis is switched off, so the gestures below are the *entire* input
-vocabulary the 2003 engine ever sees.
-
-### Gesture reference
-
-| Gesture | Result |
-| --- | --- |
-| Tap | Select, or issue a command |
-| Drag one finger | Selection box |
-| Long press (600 ms) | Right click — deselect |
-| Drag two fingers | Pan the map, 1:1 with your fingers |
-| Flick two fingers | Pan with inertia |
-| Pinch | Zoom |
-| Touch while the map is coasting | Catches it, stops dead |
-
-While a building is selected for construction:
-
-| Gesture | Result |
-| --- | --- |
-| Drag one finger | Carry the structure under your finger |
-| Carry toward a screen edge | Map scrolls; the structure stays under your finger |
-| Tap a second finger | Rotation **on** — now aim with the carrying finger |
-| Tap that second finger again | Rotation **off** — back to carrying |
-| Hold that second finger (1.2 s) | Cancel the build |
-| Lift | Place it |
-
-### The map moves with your fingers
-
-Two-finger drag is true 1:1 direct manipulation: the patch of ground under your fingers
-stays under your fingers. Each frame the cursor's previous and current positions are
-projected onto the terrain and the view shifts by the world-space difference, so it is
-automatically correct at any zoom level and under Zero Hour's tilted camera — where a pixel
-of vertical drag covers considerably more ground than a horizontal one.
-
-This replaced the engine's stock right-mouse-drag scrolling, which is a *joystick*: it
-scrolls every frame at a speed proportional to how far the cursor sits from where the
-button went down. With a mouse that is fine. Under a finger it reads as the camera
-accelerating away from you and never quite stopping where you meant.
-
-### Inertia
-
-A flick coasts and decays, and a touch catches it — the two behaviours that make a scroll
-surface feel alive on iOS.
-
-The decay is applied **per millisecond**, not per frame, at `0.998` — UIScrollView's normal
-deceleration rate, giving roughly a 1.5-second glide. A per-frame decay would send the same
-flick further on a faster device. Frame deltas are clamped to 50 ms so a hitch cannot
-teleport the map, and if the camera stops moving because it is pinned against a map
-boundary the glide is dropped rather than ground out against the edge.
-
-### Placing buildings
-
-The awkward part of building placement on a touchscreen is that the engine's model — press
-to anchor, drag to set the facing, release to commit — assumes a pointer that was already
-hovering over the battlefield before you pressed anything. Touch has no hover.
-
-So placement is re-mapped rather than re-implemented, which means the engine's own
-placement arrow, wall-run preview and validation all still work unchanged:
-
-- **Carrying** sends cursor movement with no button held, so the engine leaves the
-  placement un-anchored and simply draws the ghost wherever the cursor is.
-- **Tapping the second finger** presses the left button, which *is* what puts the engine
-  into angle mode. The placement arrow appearing is your feedback that rotation is live.
-  Tapping again un-anchors and hands the structure back to your finger.
-- **Holding the second finger** cancels. It never presses anything, so there is no held
-  button to unwind and no stray click to leak into the world.
-
-Three details that only matter once you actually use it:
-
-- **The ghost appears in the middle of the view**, not at your last tap. With a mouse the
-  pointer is already out over the map when you click a build button; on touch the cursor is
-  sitting on the command bar you just pressed, so a new ghost used to appear down in the
-  corner.
-- **Rotation ignores the first ~10 mm.** When rotation switches on, your finger is sitting
-  exactly on the anchor, and the facing is derived from anchor→cursor — so without a dead
-  circle the building spins wildly on sub-millimetre movement.
-- **The edge-scroll band is sized for a fingertip** (a twentieth of the screen height)
-  rather than the engine's 3 pixels, which is about a millimetre on a modern display and
-  also collides with iOS's own edge-swipe gestures. It is active only while placing, since
-  the rest of the time two-finger pan already covers moving the map.
-
-### Haptics
-
-A light tap when rotation engages, a medium one when a structure is placed, a heavier one
-when a build is cancelled. Timed gestures in particular have no physical affordance —
-nothing depresses — so a haptic is the only way to tell a deliberate mode change from a
-misfire.
-
-iPhone only in effect, but not in code: `UIImpactFeedbackGenerator` is simply inert on
-hardware without a Taptic Engine, which includes every iPad, so no device check is needed.
-
-### Known rough edges
-
-- **Haptics are unverified.** They were developed on an iPad, which has no Taptic Engine,
-  so they have never actually fired. They link and the call sites are right; that is all
-  that is currently known.
-- **Rotating walls is untested.** Line-build templates (walls, gates) treat anchor→cursor
-  as a *run* rather than an angle, so rotation mode on a wall will sweep its endpoint
-  around a circle rather than extend it. That may be wrong for walls specifically.
-- **A resting finger does not stop a coasting map** — only a tap or a new pan does. The
-  touch layer sends no button until a gesture commits, so there is nothing to signal a
-  finger merely being parked.
 
 ## What this port actually involved
 
