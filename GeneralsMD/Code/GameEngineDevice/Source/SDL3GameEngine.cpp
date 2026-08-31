@@ -658,6 +658,11 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 // polled from the frame loop or it would never fire.
 void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 {
+	// Publish whether a gesture is in progress. Screen-edge scrolling keys off this: the
+	// cursor freezes when the last finger lifts, so a scroll started inside the edge band
+	// would otherwise have nothing left to tell it to stop.
+	GX_SetTouchActive(s_touch.phase != TouchState::IDLE);
+
 	// Release a cancelled rotation's anchor press, a frame after the cancel itself, so the
 	// build is provably gone before this can be read as a placing click. Released at the
 	// cursor rather than the anchor: that is where the pointer actually is, and after any

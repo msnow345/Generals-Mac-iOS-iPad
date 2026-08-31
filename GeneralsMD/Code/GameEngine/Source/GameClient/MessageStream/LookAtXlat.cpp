@@ -118,6 +118,13 @@ void GX_StopPanGlide()
 	s_panGliding = false;
 	s_panVelocity.x = s_panVelocity.y = 0.0f;
 }
+
+static Bool s_touchActive = false;
+
+void GX_SetTouchActive(Bool active)
+{
+	s_touchActive = active;
+}
 #endif
 
 //-----------------------------------------------------------------------------
@@ -178,7 +185,10 @@ Bool LookAtTranslator::canScrollAtScreenEdge() const
 	// being placed: that is the one case with no alternative, because the finger carrying
 	// the ghost cannot also two-finger pan. During normal play the two-finger pan covers
 	// map movement, and an always-on edge band would scroll on any tap near the border.
-	return TheInGameUI != NULL && TheInGameUI->getPendingPlaceType() != NULL;
+	// Also requires a finger down: the cursor is frozen once the last one lifts, so an edge
+	// scroll started by a gesture that has since ended would never see the cursor leave the
+	// band and would scroll the map away indefinitely.
+	return s_touchActive && TheInGameUI != NULL && TheInGameUI->getPendingPlaceType() != NULL;
 #else
 	if (!TheMouse->isCursorCaptured())
 		return false;
@@ -520,6 +530,33 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 		case GameMessage::MSG_FRAME_TICK:
 		{
 			Coord2D offset = {0, 0};
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// GeneralsX @bugfix Claude 31/08/2026 Stop a scroll that can no longer be valid.
+			//
+			// Every scroll on touch is driven by fingers, so none of them can legitimately
+			// outlive the last one lifting. Both stop paths are unreliable here:
+			//
+			//  - Edge scrolling starts and stops under MSG_RAW_MOUSE_POSITION, nested inside
+			//    canScrollAtScreenEdge(). The cursor stops moving the moment the last finger
+			//    lifts, and that condition goes false when the build is placed or cancelled,
+			//    so the stop branch simply becomes unreachable.
+			//  - RMB scrolling ends on MSG_RAW_MOUSE_RIGHT_BUTTON_UP, but SelectionXlat runs
+			//    first (50 vs 60) and destroys right-button messages while a build is
+			//    pending. Select something to build just before a two-finger pan releases and
+			//    the up never arrives, leaving the camera panning 1:1 with the cursor forever
+			//    -- which reads as the map being glued to your finger.
+			//
+			// Enforcing the invariant here is far more robust than trying to predict which
+			// translator consumes which message. A frame tick still arrives when nothing else
+			// does, which is exactly the case that strands these scrolls.
+			if (m_isScrolling &&
+			    (!s_touchActive ||
+			     (m_scrollType == SCROLL_SCREENEDGE && !canScrollAtScreenEdge())))
+			{
+				stopScrolling();
+			}
+#endif
 
 			if (m_isScrolling && !TheInGameUI->isScrolling())
 			{

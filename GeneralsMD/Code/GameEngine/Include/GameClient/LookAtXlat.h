@@ -48,6 +48,12 @@ enum ScreenEdgeScrollMode_ CPP_11(: ScreenEdgeScrollMode)
 // signal rather than something inferred from mouse motion: ending a pan emits a motion of
 // its own at the release point, so a motion-based rule cancels the very flick it just armed.
 void GX_StopPanGlide();
+
+// GeneralsX @bugfix Claude 31/08/2026 Report whether any finger is currently down.
+// Screen-edge scrolling can only be stopped by a mouse-position message, and on touch the
+// cursor stops moving the moment the last finger lifts -- so without this the scroll runs
+// away forever whenever a gesture ends inside the edge band.
+void GX_SetTouchActive(Bool active);
 #endif
 
 class LookAtTranslator : public GameMessageTranslator
