@@ -217,6 +217,13 @@ else()
             Source/OpenALAudioManager.cpp
         )
     endif()
+
+    # GeneralsX @build Claude 31/08/2026 Touch haptics (iOS only, Objective-C++).
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        list(APPEND GAMEENGINEDEVICE_SRC
+            Source/SDL3Device/GameClient/TouchHaptics.mm
+        )
+    endif()
 endif()
 
 add_library(z_gameenginedevice STATIC)
@@ -226,6 +233,20 @@ target_sources(z_gameenginedevice PRIVATE ${GAMEENGINEDEVICE_SRC})
 target_include_directories(z_gameenginedevice PUBLIC
     Include
 )
+
+# GeneralsX @build Claude 31/08/2026 Compile the haptics unit as Objective-C++.
+# enable_language(OBJCXX) is not usable here -- calling it from a subdirectory under the iOS
+# cross-compile toolchain fails to re-detect the compiler. Driving the C++ compiler with an
+# explicit -x objective-c++ avoids introducing a new CMake language altogether. The target's
+# precompiled header is a C++ PCH and cannot be consumed by an ObjC++ unit, hence the skip.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set_source_files_properties(Source/SDL3Device/GameClient/TouchHaptics.mm
+        PROPERTIES
+            LANGUAGE CXX
+            COMPILE_OPTIONS "-x;objective-c++;-fobjc-arc"
+            SKIP_PRECOMPILE_HEADERS ON)
+    target_link_libraries(z_gameenginedevice PUBLIC "-framework UIKit" "-framework Foundation")
+endif()
 
 target_precompile_headers(z_gameenginedevice PRIVATE
     [["Utility/CppMacros.h"]] # Must be first, to be removed when abandoning VC6

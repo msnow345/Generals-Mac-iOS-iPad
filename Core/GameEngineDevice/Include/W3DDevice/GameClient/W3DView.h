@@ -165,6 +165,7 @@ public:
 	virtual void setOrigin( Int x, Int y) override;			///< Sets location of top-left view corner on display
 
 	virtual void scrollBy( const Coord2D *delta ) override;  ///< Shift the view by the given delta
+	virtual void scrollByWorld( const Coord2D *worldDelta ) override;  ///< Shift the view by a world-space delta
 
 	virtual void forceRedraw() override;
 

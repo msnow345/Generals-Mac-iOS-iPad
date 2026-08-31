@@ -37,6 +37,9 @@
 #include "GameClient/GameWindow.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
+#include "GameClient/InGameUI.h"
+#include "SDL3Device/GameClient/TouchHaptics.h"
+#include "GameClient/LookAtXlat.h"
 #include "W3DDevice/GameLogic/W3DGameLogic.h"
 #include "W3DDevice/GameClient/W3DGameClient.h"
 #include "W3DDevice/Common/W3DModuleFactory.h"
@@ -143,7 +146,15 @@ struct TouchState {
 		DRAGGING,    // finger1 drag in progress, LMB held
 		LONGPRESSED, // long-press fired (RMB click sent), swallow until lift
 		PAN,         // two-finger camera pan, RMB held
-		PINCH        // two-finger zoom, no mouse button held
+		PINCH,       // two-finger zoom, no mouse button held
+		// Build placement carries its own two phases: a structure being positioned
+		// tracks the finger with NO button held (so the engine leaves the placement
+		// un-anchored and the ghost simply follows), and a dwell then presses the
+		// left button to anchor it, which is what puts the engine into angle/line mode.
+		PLACING_CARRY,
+		PLACING_ARMED,     // 2nd finger down, nothing sent yet: tap -> rotate, hold -> cancel
+		PLACING_ROTATE,
+		PLACING_CANCELLED  // build cancelled, swallow everything until all fingers lift
 	};
 
 	Phase phase = IDLE;
@@ -156,6 +167,11 @@ struct TouchState {
 	float twoStartDist = 0.0f;
 	float pinchDist = 0.0f;             // finger distance at last wheel step
 	Uint64 downTicks = 0;
+	float placeAnchorX = 0.0f, placeAnchorY = 0.0f; // anchor the engine is rotating about
+	Uint64 armedTicks = 0;              // when the 2nd finger landed
+	bool armedFromRotate = false;       // second finger arrived while already rotating
+	bool releaseLeftPending = false;    // anchor press still to be released, next frame
+	bool rotateBeyondRadius = false;    // finger has left the dead circle around the anchor
 	float f1x = 0.0f, f1y = 0.0f, f2x = 0.0f, f2y = 0.0f; // normalized per finger
 };
 
@@ -167,6 +183,21 @@ const float PINCH_STEP_RATIO = 0.03f;       // 3% distance change per wheel tick
 const float MIN_TOUCH_DEAD_ZONE_PX = 8.0f;  // low-density floor for tap/pan/pinch jitter
 const float TOUCH_DEAD_ZONE_MM = 3.0f;
 const float SDL_BASE_POINTS_PER_MM = 160.0f / 25.4f;
+// GeneralsX @tweak Claude 31/08/2026 Build-placement touch gesture.
+// One finger carries the structure. A second finger arms rotation but deliberately sends
+// NOTHING yet: twisting commits to rotate, holding both still cancels the build. Arming
+// without pressing is what makes cancel clean -- there is no held left button to unwind,
+// so cancelling cannot leave a stray place or selection behind.
+const Uint64 PLACE_CANCEL_HOLD_MS = 1200;   // deliberate: second finger held down
+// Once rotation starts the carrying finger is sitting ON the anchor, so anchor->finger is
+// ~zero and the facing would spin wildly on sub-millimetre movement. Suppress angle
+// updates until the finger leaves this radius.
+const float PLACE_ROTATE_MIN_RADIUS_MM = 10.0f;
+
+bool isPlacingBuilding()
+{
+	return TheInGameUI != nullptr && TheInGameUI->getPendingPlaceType() != nullptr;
+}
 
 float getTouchDeadZonePx(SDL_Window *window)
 {
@@ -190,6 +221,19 @@ float getTouchDeadZonePx(SDL_Window *window)
 	}
 
 	return deadZonePx;
+}
+
+float getPlaceRotateRadiusPx(SDL_Window *window)
+{
+	// Same density basis as the dead zone, just a larger circle.
+	return getTouchDeadZonePx(window) * (PLACE_ROTATE_MIN_RADIUS_MM / TOUCH_DEAD_ZONE_MM);
+}
+
+// True while a placement gesture is tracking a second finger.
+bool isPlacingTwoFingerPhase()
+{
+	return s_touch.phase == TouchState::PLACING_ARMED ||
+	       s_touch.phase == TouchState::PLACING_ROTATE;
 }
 
 float getCentroidX(int winW)
@@ -251,6 +295,22 @@ void sendSyntheticMouse(SDL3Mouse *mouse, SDL_Window *window, Uint32 type,
 			break;
 	}
 	mouse->addSDLEvent(&ev);
+}
+
+// While rotating, the structure sits on the anchor and the facing (or wall run) follows
+// anchor->cursor, so the carrying finger simply points the building. Updates are withheld
+// until the finger clears the anchor, otherwise the angle spins on noise.
+void sendPlaceRotateCursor(SDL3Mouse *mouse, SDL_Window *window, float px, float py)
+{
+	const float rdx = px - s_touch.placeAnchorX;
+	const float rdy = py - s_touch.placeAnchorY;
+	if (!s_touch.rotateBeyondRadius &&
+	    SDL_sqrtf(rdx * rdx + rdy * rdy) >= getPlaceRotateRadiusPx(window)) {
+		s_touch.rotateBeyondRadius = true;
+	}
+	if (s_touch.rotateBeyondRadius) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+	}
 }
 
 void beginPan(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
@@ -325,7 +385,39 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
-		if (s_touch.phase == TouchState::IDLE) {
+		// A finger touching down catches a coasting map, the way it does in any iOS scroll
+		// view. Signalled explicitly rather than inferred downstream from mouse motion,
+		// because ending a pan emits a motion of its own at the release point.
+		GX_StopPanGlide();
+
+		if (s_touch.phase == TouchState::IDLE && isPlacingBuilding()) {
+			// Carry the structure: cursor tracks the finger with no button pressed, so
+			// the engine keeps the placement un-anchored and just moves the ghost. The
+			// long-press RMB is not reachable from this phase, which matters because a
+			// right click cancels placement -- the dwell would otherwise cancel the build
+			// at the same moment it tried to start rotating it.
+			s_touch.finger1 = event.tfinger.fingerID;
+			s_touch.phase = TouchState::PLACING_CARRY;
+			s_touch.downX = s_touch.lastX = px;
+			s_touch.downY = s_touch.lastY = py;
+			s_touch.f1x = event.tfinger.x;
+			s_touch.f1y = event.tfinger.y;
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+		}
+		else if (s_touch.phase == TouchState::PLACING_CARRY ||
+		         s_touch.phase == TouchState::PLACING_ROTATE) {
+			// Second finger down: outcome is decided by how long it stays. A quick tap
+			// turns on rotation; holding cancels the build. Nothing is sent yet, so the
+			// decision is made while the carrying finger is still down -- never at the
+			// lift, which always means "place".
+			s_touch.armedFromRotate = (s_touch.phase == TouchState::PLACING_ROTATE);
+			s_touch.finger2 = event.tfinger.fingerID;
+			s_touch.f2x = event.tfinger.x;
+			s_touch.f2y = event.tfinger.y;
+			s_touch.armedTicks = SDL_GetTicks();
+			s_touch.phase = TouchState::PLACING_ARMED;
+		}
+		else if (s_touch.phase == TouchState::IDLE) {
 			// Defer all BUTTON output: a finger landing could become a tap, a
 			// drag-box, a long-press, or the first finger of a camera pan. A
 			// premature LMB down+up is a real click to the game (e.g. it sets a
@@ -374,14 +466,35 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			s_touch.f1y = event.tfinger.y;
 			s_touch.lastX = px;
 			s_touch.lastY = py;
-		} else if (isTwoFingerPhase() && event.tfinger.fingerID == s_touch.finger2) {
+		} else if ((isTwoFingerPhase() || isPlacingTwoFingerPhase()) &&
+		           event.tfinger.fingerID == s_touch.finger2) {
 			s_touch.f2x = event.tfinger.x;
 			s_touch.f2y = event.tfinger.y;
 		} else {
 			break;
 		}
 
-		if (s_touch.phase == TouchState::PENDING && event.tfinger.fingerID == s_touch.finger1) {
+		if (s_touch.phase == TouchState::PLACING_CARRY && event.tfinger.fingerID == s_touch.finger1) {
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+		}
+		else if (s_touch.phase == TouchState::PLACING_ARMED &&
+		         event.tfinger.fingerID == s_touch.finger1) {
+			// The carrying finger keeps doing whatever it was doing while the second
+			// finger's intent is still undecided.
+			if (s_touch.armedFromRotate) {
+				sendPlaceRotateCursor(mouse, window, px, py);
+			} else {
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+			}
+		}
+		else if (s_touch.phase == TouchState::PLACING_ROTATE &&
+		         event.tfinger.fingerID == s_touch.finger1) {
+			sendPlaceRotateCursor(mouse, window, px, py);
+		}
+		else if (s_touch.phase == TouchState::PLACING_CANCELLED) {
+			// swallow until every finger is lifted
+		}
+		else if (s_touch.phase == TouchState::PENDING && event.tfinger.fingerID == s_touch.finger1) {
 			const float dx = px - s_touch.downX;
 			const float dy = py - s_touch.downY;
 			const float moved = SDL_sqrtf(dx * dx + dy * dy);
@@ -416,10 +529,98 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 	case SDL_EVENT_FINGER_UP:
 	case SDL_EVENT_FINGER_CANCELED:
 		if (event.tfinger.fingerID != s_touch.finger1 &&
-		    !(isTwoFingerPhase() && event.tfinger.fingerID == s_touch.finger2)) {
+		    !((isTwoFingerPhase() || isPlacingTwoFingerPhase()) &&
+		      event.tfinger.fingerID == s_touch.finger2)) {
 			break;
 		}
 		switch (s_touch.phase) {
+			case TouchState::PLACING_CARRY:
+				// Lifted without ever enabling rotation: place at the default facing. This
+				// is the common case and stays a single quick drag-and-drop.
+				if (event.type == SDL_EVENT_FINGER_CANCELED) {
+					break;
+				}
+				GX_TouchHaptic(GX_HAPTIC_MEDIUM);
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+				                   px, py, SDL_BUTTON_LEFT);
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+				                   px, py, SDL_BUTTON_LEFT);
+				break;
+			case TouchState::PLACING_ARMED:
+				if (event.tfinger.fingerID == s_touch.finger2) {
+					// Released before the cancel hold: that was a tap, so toggle rotation.
+					GX_TouchHaptic(GX_HAPTIC_LIGHT);
+					if (!s_touch.armedFromRotate) {
+						// On. Anchoring is what puts the engine into angle (or line-build)
+						// mode, and it is the anchor the ghost then sits on.
+						s_touch.placeAnchorX = s_touch.lastX;
+						s_touch.placeAnchorY = s_touch.lastY;
+						s_touch.rotateBeyondRadius = false;
+						sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION,
+						                   s_touch.placeAnchorX, s_touch.placeAnchorY);
+						sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+						                   s_touch.placeAnchorX, s_touch.placeAnchorY, SDL_BUTTON_LEFT);
+						s_touch.phase = TouchState::PLACING_ROTATE;
+						return;
+					}
+
+					// Off. Un-anchor so the ghost tracks the finger again, keeping the build
+					// pending, then let go of the anchor press.
+					//
+					// Where that release lands matters. PlaceEventTranslator only consumes
+					// the click while the placement is anchored, so once un-anchored a
+					// release that reads as a click (same spot as the press) would fall
+					// through to selection and deselect the builder. Releasing clear of the
+					// anchor fails the click test on distance, so no click is synthesised at
+					// all; the cursor is then put straight back under the finger, within the
+					// same batch, so nothing is drawn at the intermediate point.
+					TheInGameUI->setPlacementStart(nullptr);
+
+					float releaseX = s_touch.lastX;
+					float releaseY = s_touch.lastY;
+					const float minAway = getPlaceRotateRadiusPx(window);
+					const float offX = releaseX - s_touch.placeAnchorX;
+					const float offY = releaseY - s_touch.placeAnchorY;
+					if (SDL_sqrtf(offX * offX + offY * offY) < minAway) {
+						// Toggled straight back off without moving: pick a release point
+						// clear of the anchor, on whichever side has room.
+						releaseX = (s_touch.placeAnchorX > (float)winW * 0.5f)
+						         ? s_touch.placeAnchorX - minAway * 2.0f
+						         : s_touch.placeAnchorX + minAway * 2.0f;
+						releaseY = s_touch.placeAnchorY;
+					}
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, releaseX, releaseY);
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+					                   releaseX, releaseY, SDL_BUTTON_LEFT);
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION,
+					                   s_touch.lastX, s_touch.lastY);
+					s_touch.rotateBeyondRadius = false;
+					s_touch.phase = TouchState::PLACING_CARRY;
+					return;
+				}
+				// Carrying finger lifted first: commit, exactly as an un-armed lift would.
+				GX_TouchHaptic(GX_HAPTIC_MEDIUM);
+				if (s_touch.armedFromRotate) {
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+					                   s_touch.placeAnchorX, s_touch.placeAnchorY, SDL_BUTTON_LEFT);
+				} else {
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.lastX, s_touch.lastY);
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+					                   s_touch.lastX, s_touch.lastY, SDL_BUTTON_LEFT);
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+					                   s_touch.lastX, s_touch.lastY, SDL_BUTTON_LEFT);
+				}
+				break;
+			case TouchState::PLACING_ROTATE:
+				// Left button has been held at the anchor since rotation was enabled;
+				// releasing the carrying finger commits the placement at that facing.
+				GX_TouchHaptic(GX_HAPTIC_MEDIUM);
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+				                   s_touch.placeAnchorX, s_touch.placeAnchorY, SDL_BUTTON_LEFT);
+				break;
+			case TouchState::PLACING_CANCELLED:
+				break;
 			case TouchState::PENDING:
 				// A CANCELED touch (incoming call, notification shade, palm
 				// rejection) must not become a committed tap — that would be a
@@ -457,6 +658,38 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 // polled from the frame loop or it would never fire.
 void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 {
+	// Release a cancelled rotation's anchor press, a frame after the cancel itself, so the
+	// build is provably gone before this can be read as a placing click. Released at the
+	// cursor rather than the anchor: that is where the pointer actually is, and after any
+	// rotation it is far enough away not to qualify as a click at all.
+	if (s_touch.releaseLeftPending) {
+		s_touch.releaseLeftPending = false;
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+		                   s_touch.lastX, s_touch.lastY, SDL_BUTTON_LEFT);
+	}
+
+	// Holding the second finger cancels the build, from carrying or mid-rotate alike.
+	// Polled per frame for the same reason as the long press: a motionless finger emits no
+	// SDL events. Cancelling is a right click, which CommandXlat.cpp already handles.
+	if (s_touch.phase == TouchState::PLACING_ARMED &&
+	    (SDL_GetTicks() - s_touch.armedTicks) >= PLACE_CANCEL_HOLD_MS) {
+		GX_TouchHaptic(GX_HAPTIC_HEAVY);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.lastX, s_touch.lastY);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+		                   s_touch.lastX, s_touch.lastY, SDL_BUTTON_RIGHT);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+		                   s_touch.lastX, s_touch.lastY, SDL_BUTTON_RIGHT);
+		// Defer releasing the anchor press to the NEXT frame. Releasing it here queues a
+		// left up that pairs with the anchor press into a synthesised MSG_MOUSE_LEFT_CLICK
+		// -- which is the message PlaceEventTranslator places on, and it is propagated
+		// ahead of the raw right-button up, so the building got placed and the cancel then
+		// found nothing pending. Cancelling one frame earlier makes the ordering explicit
+		// instead of relying on how the two message kinds interleave.
+		s_touch.releaseLeftPending = s_touch.armedFromRotate;
+		s_touch.phase = TouchState::PLACING_CANCELLED;
+		return;
+	}
+
 	if (s_touch.phase == TouchState::PENDING &&
 	    (SDL_GetTicks() - s_touch.downTicks) >= LONG_PRESS_MS) {
 		// No LMB was sent yet (deferred), so this is a pure right-click.

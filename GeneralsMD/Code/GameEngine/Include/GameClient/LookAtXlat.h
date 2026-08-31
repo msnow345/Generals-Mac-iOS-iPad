@@ -42,6 +42,14 @@ enum ScreenEdgeScrollMode_ CPP_11(: ScreenEdgeScrollMode)
 };
 
 //-----------------------------------------------------------------------------
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+// GeneralsX @tweak Claude 31/08/2026 Stop a coasting touch pan.
+// Called from the touch translator the instant a finger lands. Deliberately an explicit
+// signal rather than something inferred from mouse motion: ending a pan emits a motion of
+// its own at the release point, so a motion-based rule cancels the very flick it just armed.
+void GX_StopPanGlide();
+#endif
+
 class LookAtTranslator : public GameMessageTranslator
 {
 public:
@@ -71,6 +79,10 @@ private:
 	ICoord2D m_anchor;
 	ICoord2D m_originalAnchor;
 	ICoord2D m_currentPos;
+	// GeneralsX @tweak Claude 31/08/2026 Cursor position at the previous scroll tick, used by
+	// the touch 1:1 drag path to derive one frame of travel. Unused off-iOS.
+	ICoord2D m_lastScrollPos;
+
 	Real m_anchorAngle;
 	Bool m_isScrolling;				// set to true if we are in the act of RMB scrolling
 	Bool m_isRotating;					// set to true if we are in the act of MMB rotating

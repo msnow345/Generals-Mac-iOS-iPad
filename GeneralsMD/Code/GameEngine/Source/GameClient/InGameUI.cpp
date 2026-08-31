@@ -71,6 +71,9 @@
 #include "GameClient/View.h"
 #include "GameClient/TerrainVisual.h"
 #include "GameClient/Display.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "GameClient/WindowLayout.h"
 #include "GameClient/LookAtXlat.h"
 #include "GameClient/SelectionXlat.h"
@@ -3297,6 +3300,23 @@ void InGameUI::placeBuildAvailable( const ThingTemplate *build, Drawable *buildD
 	// place something, it is overwritten
 	//
 	m_pendingPlaceType = build;
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @tweak Claude 31/08/2026 Centre a new build ghost on touch.
+	// The ghost is drawn at the cursor while the placement is un-anchored (see the
+	// m_pendingPlaceType block in preDraw). With a mouse the pointer is already out over
+	// the battlefield when the build button is clicked, but touch has no hover: the cursor
+	// is simply wherever the player last tapped, which is the command bar, so a new ghost
+	// appeared down in the corner. Drop it into the middle of the view instead. Biased
+	// slightly above centre so it lands in open battlefield rather than behind the command
+	// bar along the bottom edge.
+	if( build != nullptr && TheMouse != nullptr && TheDisplay != nullptr )
+	{
+		const Int centreX = (Int)(TheDisplay->getWidth() / 2);
+		const Int centreY = (Int)(TheDisplay->getHeight() * 0.45f);
+		TheMouse->setPosition( centreX, centreY );
+	}
+#endif
 
 	//Keep the prev pending place for left click deselection prevention in alternate mouse mode.
 	//We want to keep our dozer selected after initiating construction.

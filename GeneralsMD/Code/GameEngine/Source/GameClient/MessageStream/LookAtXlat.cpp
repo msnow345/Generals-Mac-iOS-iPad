@@ -48,6 +48,9 @@
 #include "GameClient/View.h"
 #include "GameClient/Drawable.h"
 #include "GameClient/LookAtXlat.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "GameLogic/Module/UpdateModule.h"
 #include "GameLogic/GameLogic.h"
 
@@ -79,13 +82,57 @@ constexpr const Real SCROLL_AMT = 100.0f * SCROLL_MULTIPLIER;
 
 static const Int edgeScrollSize = 3;
 
+// GeneralsX @tweak Claude 31/08/2026 A 3px band is a fine mouse target but is physically
+// unreachable with a fingertip (~1mm on this display), and it overlaps the iOS system
+// edge-swipe gestures. Give touch a band it can actually hit, scaled to the display.
+static Int getEdgeScrollSize()
+{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	const Int height = (TheDisplay != NULL) ? (Int)TheDisplay->getHeight() : 0;
+	const Int touchBand = height / 20;
+	return (touchBand > edgeScrollSize) ? touchBand : edgeScrollSize;
+#else
+	return edgeScrollSize;
+#endif
+}
+
 static Mouse::MouseCursor prevCursor = Mouse::ARROW;
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+// GeneralsX @tweak Claude 31/08/2026 Touch pan momentum.
+// Velocity is world units per MILLISECOND and the decay is applied per millisecond, so the
+// glide is identical whatever the frame rate -- a per-frame decay makes the same flick travel
+// further on a faster machine. The rate matches UIScrollView's normal deceleration (0.998/ms,
+// roughly a 1.5s coast), which is what makes it read as native rather than merely damped.
+static Coord2D s_panVelocity = { 0.0f, 0.0f };
+static Bool s_panGliding = false;
+static UnsignedInt s_panLastMsec = 0;
+
+static const Real PAN_DECAY_PER_MS   = 0.998f;
+static const Real PAN_MIN_FLICK      = 0.15f;  // units/ms below which a release is not a flick
+static const Real PAN_MIN_GLIDE      = 0.02f;  // units/ms at which the coast is spent
+static const UnsignedInt PAN_MAX_DT  = 50;     // clamp, so a frame hitch cannot teleport the map
+
+void GX_StopPanGlide()
+{
+	s_panGliding = false;
+	s_panVelocity.x = s_panVelocity.y = 0.0f;
+}
+#endif
 
 //-----------------------------------------------------------------------------
 void LookAtTranslator::setScrolling(ScrollType scrollType)
 {
 	if (!TheInGameUI->getInputEnabled())
 		return;
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// A new scroll supersedes any coast in progress.
+	// Deliberately NOT keyed off mouse motion: ending a pan emits a position message of its
+	// own at the release point, so a motion-based rule cancelled the flick it had just
+	// armed, every time, exactly one frame in.
+	GX_StopPanGlide();
+#endif
 
 	prevCursor = TheMouse->getMouseCursor();
 	m_isScrolling = true;
@@ -99,6 +146,17 @@ void LookAtTranslator::setScrolling(ScrollType scrollType)
 //-----------------------------------------------------------------------------
 void LookAtTranslator::stopScrolling()
 {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @tweak Claude 31/08/2026 Let a flick coast. Below the threshold the finger
+	// was effectively parked, and coasting from that reads as drift rather than momentum.
+	const Real speed = (Real)sqrt(s_panVelocity.x * s_panVelocity.x + s_panVelocity.y * s_panVelocity.y);
+	s_panGliding = (m_scrollType == SCROLL_RMB) && (speed > PAN_MIN_FLICK);
+	if (!s_panGliding) {
+		s_panVelocity.x = s_panVelocity.y = 0.0f;
+	} else {
+		s_panLastMsec = timeGetTime();
+	}
+#endif
 	m_isScrolling = false;
 	TheInGameUI->setScrolling( FALSE );
 	TheTacticalView->setMouseLock( FALSE );
@@ -114,6 +172,14 @@ void LookAtTranslator::stopScrolling()
 //-----------------------------------------------------------------------------
 Bool LookAtTranslator::canScrollAtScreenEdge() const
 {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @tweak Claude 31/08/2026 There is no cursor capture on touch, so the check
+	// below would disable edge scrolling outright. Enable it only while a structure is
+	// being placed: that is the one case with no alternative, because the finger carrying
+	// the ghost cannot also two-finger pan. During normal play the two-finger pan covers
+	// map movement, and an always-on edge band would scroll on any tap near the border.
+	return TheInGameUI != NULL && TheInGameUI->getPendingPlaceType() != NULL;
+#else
 	if (!TheMouse->isCursorCaptured())
 		return false;
 
@@ -129,6 +195,7 @@ Bool LookAtTranslator::canScrollAtScreenEdge() const
 	}
 
 	return true;
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -145,6 +212,8 @@ LookAtTranslator::LookAtTranslator() :
 {
 	m_anchor.x = m_anchor.y = 0;
 	m_currentPos.x = m_currentPos.y = 0;
+	m_lastScrollPos.x = m_lastScrollPos.y = 0;
+
 	m_originalAnchor.x = m_originalAnchor.y = 0;
 
 	OptionPreferences prefs;
@@ -254,12 +323,27 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 		}
 
 		//-----------------------------------------------------------------------------
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+		//-----------------------------------------------------------------------------
+		// GeneralsX @tweak Claude 31/08/2026 A tap catches a coasting map. Handled here
+		// purely to stop the glide; the message is kept for the translators below.
+		case GameMessage::MSG_RAW_MOUSE_LEFT_BUTTON_DOWN:
+		{
+			GX_StopPanGlide();
+			break;
+		}
+#endif
+
+		//-----------------------------------------------------------------------------
 		case GameMessage::MSG_RAW_MOUSE_RIGHT_BUTTON_DOWN:
 		{
 			m_lastMouseMoveTimeMsec = timeGetTime();
 
 			m_anchor = msg->getArgument( 0 )->pixel;
 			m_currentPos = msg->getArgument( 0 )->pixel;
+			// GeneralsX @tweak Claude 31/08/2026 Seed the 1:1 touch drag so the first
+			// scroll tick measures travel from the press, not from a stale position.
+			m_lastScrollPos = msg->getArgument( 0 )->pixel;
 
 			if (!TheInGameUI->isSelecting() && !m_isScrolling)
 			{
@@ -346,14 +430,14 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 			{
 				if (m_isScrolling)
 				{
-					if ( m_scrollType == SCROLL_SCREENEDGE && (m_currentPos.x >= edgeScrollSize && m_currentPos.y >= edgeScrollSize && m_currentPos.y < height-edgeScrollSize && m_currentPos.x < width-edgeScrollSize) )
+					if ( m_scrollType == SCROLL_SCREENEDGE && (m_currentPos.x >= getEdgeScrollSize() && m_currentPos.y >= getEdgeScrollSize() && m_currentPos.y < height-getEdgeScrollSize() && m_currentPos.x < width-getEdgeScrollSize()) )
 					{
 						stopScrolling();
 					}
 				}
 				else
 				{
-					if ( m_currentPos.x < edgeScrollSize || m_currentPos.y < edgeScrollSize || m_currentPos.y >= height-edgeScrollSize || m_currentPos.x >= width-edgeScrollSize )
+					if ( m_currentPos.x < getEdgeScrollSize() || m_currentPos.y < getEdgeScrollSize() || m_currentPos.y >= height-getEdgeScrollSize() || m_currentPos.x >= width-getEdgeScrollSize() )
 					{
 						setScrolling(SCROLL_SCREENEDGE);
 					}
@@ -454,6 +538,60 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 				{
 				case SCROLL_RMB:
 					{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+						// GeneralsX @tweak Claude 31/08/2026 1:1 drag panning for touch.
+						// Every mouse event on iOS is synthesized from a two-finger gesture
+						// (SDL3GameEngine.cpp), so RMB scrolling here IS the touch camera pan.
+						// The joystick model below -- scroll every frame at a speed set by the
+						// cursor's distance from its anchor -- reads as the camera accelerating
+						// away from the fingers, because the map keeps moving while the fingers
+						// are merely held still off-centre.
+						//
+						// Instead, project this frame's cursor travel onto the terrain and shift
+						// the view by the world-space difference, which pins the ground point
+						// under the fingers: the map tracks them exactly and stops dead when they
+						// stop. Projecting both endpoints against the same camera also makes this
+						// correct at any zoom and under the tilted camera, where a pixel of
+						// vertical travel covers more ground than a horizontal one.
+						Coord3D prevWorld, curWorld;
+						prevWorld.zero();
+						curWorld.zero();
+						TheTacticalView->screenToTerrain(&m_lastScrollPos, &prevWorld);
+						TheTacticalView->screenToTerrain(&m_currentPos, &curWorld);
+
+						// screenToTerrain leaves the result all-zero when the pick ray misses the
+						// terrain (a cursor above the horizon, say). Taking that as a real point
+						// would fling the camera to the map origin, so skip the tick instead and
+						// resync, losing one frame of pan rather than the whole gesture.
+						const Bool prevHit = !(prevWorld.x == 0.0f && prevWorld.y == 0.0f && prevWorld.z == 0.0f);
+						const Bool curHit  = !(curWorld.x == 0.0f && curWorld.y == 0.0f && curWorld.z == 0.0f);
+						if (prevHit && curHit)
+						{
+							// Apply in world space. offset is deliberately left at {0,0}: the shared
+							// userScrollBy() after this switch reads its delta as device space, so
+							// handing it a world-space value there would apply the move a second time
+							// through the wrong transform (inverted on Y, scaled by camera distance).
+							Coord2D worldDelta;
+							worldDelta.x = prevWorld.x - curWorld.x;
+							worldDelta.y = prevWorld.y - curWorld.y;
+							TheTacticalView->userScrollByWorld(&worldDelta);
+							// Smooth into a velocity so a flick carries the gesture's overall
+							// speed rather than whatever the final frame happened to catch,
+							// which is at its noisiest just as the finger leaves.
+							const UnsignedInt nowMsec = timeGetTime();
+							UnsignedInt dt = nowMsec - s_panLastMsec;
+							if (dt > PAN_MAX_DT) dt = PAN_MAX_DT;
+							s_panLastMsec = nowMsec;
+							if (dt > 0)
+							{
+								const Real blend = 0.3f;
+								const Real invDt = 1.0f / (Real)dt;
+								s_panVelocity.x = s_panVelocity.x * (1.0f - blend) + (worldDelta.x * invDt) * blend;
+								s_panVelocity.y = s_panVelocity.y * (1.0f - blend) + (worldDelta.y * invDt) * blend;
+							}
+						}
+						m_lastScrollPos = m_currentPos;
+#else
 						if (TheInGameUI->shouldMoveRMBScrollAnchor())
 						{
 							Int maxX = TheDisplay->getWidth()/2;
@@ -479,6 +617,7 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 						vec.normalize();
 						offset.x = TheGlobalData->m_horizontalScrollSpeedFactor * fpsRatio * vecLength * vec.x * SCROLL_MULTIPLIER * TheGlobalData->m_keyboardScrollFactor;
 						offset.y = TheGlobalData->m_verticalScrollSpeedFactor * fpsRatio * vecLength * vec.y * SCROLL_MULTIPLIER * TheGlobalData->m_keyboardScrollFactor;
+#endif
 					}
 					break;
 				case SCROLL_KEY:
@@ -505,19 +644,19 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 					{
 						UnsignedInt height = TheDisplay->getHeight();
 						UnsignedInt width  = TheDisplay->getWidth();
-						if (m_currentPos.y < edgeScrollSize)
+						if (m_currentPos.y < getEdgeScrollSize())
 						{
 							offset.y -= TheGlobalData->m_verticalScrollSpeedFactor * fpsRatio * SCROLL_AMT * TheGlobalData->m_keyboardScrollFactor;
 						}
-						if (m_currentPos.y >= height-edgeScrollSize)
+						if (m_currentPos.y >= height-getEdgeScrollSize())
 						{
 							offset.y += TheGlobalData->m_verticalScrollSpeedFactor * fpsRatio * SCROLL_AMT * TheGlobalData->m_keyboardScrollFactor;
 						}
-						if (m_currentPos.x < edgeScrollSize)
+						if (m_currentPos.x < getEdgeScrollSize())
 						{
 							offset.x -= TheGlobalData->m_horizontalScrollSpeedFactor * fpsRatio * SCROLL_AMT * TheGlobalData->m_keyboardScrollFactor;
 						}
-						if (m_currentPos.x >= width-edgeScrollSize)
+						if (m_currentPos.x >= width-getEdgeScrollSize())
 						{
 							offset.x += TheGlobalData->m_horizontalScrollSpeedFactor * fpsRatio * SCROLL_AMT * TheGlobalData->m_keyboardScrollFactor;
 						}
@@ -530,9 +669,48 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 			}
 			else
 			{
-				//not scrolling so reset amount
-				TheInGameUI->setScrollAmount(offset);
-				TheTacticalView->scrollBy(&offset);
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+				if (s_panGliding)
+				{
+					// Coast. Distance is velocity x elapsed time and the decay is applied per
+					// millisecond, so the curve is identical at any frame rate. If the view
+					// did not actually move, the camera is pinned against a map edge, so drop
+					// the glide rather than grind on it for the rest of the decay.
+					const UnsignedInt nowMsec = timeGetTime();
+					UnsignedInt dt = nowMsec - s_panLastMsec;
+					if (dt > PAN_MAX_DT) dt = PAN_MAX_DT;
+					s_panLastMsec = nowMsec;
+
+					if (dt > 0)
+					{
+						Coord2D step;
+						step.x = s_panVelocity.x * (Real)dt;
+						step.y = s_panVelocity.y * (Real)dt;
+
+						const Coord3D before = TheTacticalView->getPosition();
+						TheTacticalView->userScrollByWorld(&step);
+						const Coord3D after = TheTacticalView->getPosition();
+						const Real movedSq = (after.x - before.x) * (after.x - before.x) +
+						                     (after.y - before.y) * (after.y - before.y);
+
+						const Real decay = (Real)pow((double)PAN_DECAY_PER_MS, (double)dt);
+						s_panVelocity.x *= decay;
+						s_panVelocity.y *= decay;
+						const Real speed = (Real)sqrt(s_panVelocity.x * s_panVelocity.x +
+						                              s_panVelocity.y * s_panVelocity.y);
+						if (speed < PAN_MIN_GLIDE || movedSq < 0.0001f)
+						{
+							GX_StopPanGlide();
+						}
+					}
+				}
+				else
+#endif
+				{
+					//not scrolling so reset amount
+					TheInGameUI->setScrollAmount(offset);
+					TheTacticalView->scrollBy(&offset);
+				}
 			}
 
 			//if (TheGlobalData->m_saveCameraInReplay /*&& TheRecorder->getMode() != RECORDERMODETYPE_PLAYBACK *//**/&& (TheGameLogic->isInSinglePlayerGame() || TheGameLogic->isInSkirmishGame())/**/)

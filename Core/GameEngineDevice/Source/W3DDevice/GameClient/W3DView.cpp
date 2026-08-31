@@ -2111,6 +2111,34 @@ void W3DView::setSnapMode( CameraLockType lockType, Real lockDist )
 // TheSuperHackers @bugfix Now rotates the view plane on the Z axis only to properly discard the
 // camera pitch. The aspect ratio also no longer modifies the vertical scroll speed.
 //-------------------------------------------------------------------------------------------------
+// GeneralsX @tweak Claude 31/08/2026 World-space counterpart of scrollBy().
+// Deliberately mirrors scrollBy()'s bookkeeping -- same scripted-state clearing, same
+// m_recalcCamera -- and, like it, leaves the camera area constraints alone: those are
+// recalculated once scrolling stops (see m_recalcCameraConstraintsAfterScrolling), so
+// invalidating them every frame of a drag would fight that. The only difference is that the
+// delta is applied straight to the view position instead of being pushed through the
+// camera's device->view transform.
+void W3DView::scrollByWorld( const Coord2D *worldDelta )
+{
+	if( worldDelta && (worldDelta->x != 0.0f || worldDelta->y != 0.0f) )
+	{
+		m_scrollAmount = *worldDelta;
+
+		Coord2D pos = getPosition2D();
+		pos.x += worldDelta->x;
+		pos.y += worldDelta->y;
+		setPosition2D(pos);
+
+		removeScriptedState(Scripted_Rotate);
+		m_recalcCamera = true;
+	}
+	else
+	{
+		m_scrollAmount.x = 0;
+		m_scrollAmount.y = 0;
+	}
+}
+
 void W3DView::scrollBy( const Coord2D *delta )
 {
 	if( delta && (delta->x != 0 || delta->y != 0) )

@@ -3,8 +3,10 @@
 <img width="500" height="281" alt="IMG_3457_500" src="https://github.com/user-attachments/assets/aeaf6692-36e6-40c8-b9f8-8066d014ec4b" />
 
 **Zero Hour running natively on Apple Silicon Macs, iPhone, and iPad** — campaign,
-skirmish, and Generals Challenge, with touch controls built for RTS (tap-select,
-drag-box, long-press deselect, two-finger scroll, pinch zoom). No emulation: this
+skirmish, and Generals Challenge, with [touch controls built for RTS](#touch-controls):
+the map moves 1:1 under your fingers and coasts when you flick it, buildings are
+carried into place and rotated with a second finger, plus tap-select, drag-box,
+long-press deselect and pinch zoom. No emulation: this
 is the real 2003 engine compiled for ARM64, rendering DirectX 8 →
 [DXVK](https://github.com/doitsujin/dxvk) → Vulkan →
 [MoltenVK](https://github.com/KhronosGroup/MoltenVK) → Metal.
@@ -18,6 +20,118 @@ what. The original GeneralsX README lives on the `upstream-main` branch.
 
 **No game assets are included or distributed.** You need your own copy
 ([Steam](https://store.steampowered.com/app/2732960/), ~$5 on sale).
+
+## Touch controls
+
+An RTS designed for a mouse gives you a pointer that hovers, two buttons, and a scroll
+wheel. A touchscreen gives you none of those. Rather than paint a virtual mouse on the
+screen, the touch layer here is built around **direct manipulation** — you move the map,
+you carry the building, and the engine is told about it in the only language it speaks.
+
+Every mouse event the game receives on iOS is synthesised from touch in
+[`SDL3GameEngine.cpp`](GeneralsMD/Code/GameEngineDevice/Source/SDL3GameEngine.cpp); SDL's
+own touch→mouse synthesis is switched off, so the gestures below are the *entire* input
+vocabulary the 2003 engine ever sees.
+
+### Gesture reference
+
+| Gesture | Result |
+| --- | --- |
+| Tap | Select, or issue a command |
+| Drag one finger | Selection box |
+| Long press (600 ms) | Right click — deselect |
+| Drag two fingers | Pan the map, 1:1 with your fingers |
+| Flick two fingers | Pan with inertia |
+| Pinch | Zoom |
+| Touch while the map is coasting | Catches it, stops dead |
+
+While a building is selected for construction:
+
+| Gesture | Result |
+| --- | --- |
+| Drag one finger | Carry the structure under your finger |
+| Carry toward a screen edge | Map scrolls; the structure stays under your finger |
+| Tap a second finger | Rotation **on** — now aim with the carrying finger |
+| Tap that second finger again | Rotation **off** — back to carrying |
+| Hold that second finger (1.2 s) | Cancel the build |
+| Lift | Place it |
+
+### The map moves with your fingers
+
+Two-finger drag is true 1:1 direct manipulation: the patch of ground under your fingers
+stays under your fingers. Each frame the cursor's previous and current positions are
+projected onto the terrain and the view shifts by the world-space difference, so it is
+automatically correct at any zoom level and under Zero Hour's tilted camera — where a pixel
+of vertical drag covers considerably more ground than a horizontal one.
+
+This replaced the engine's stock right-mouse-drag scrolling, which is a *joystick*: it
+scrolls every frame at a speed proportional to how far the cursor sits from where the
+button went down. With a mouse that is fine. Under a finger it reads as the camera
+accelerating away from you and never quite stopping where you meant.
+
+### Inertia
+
+A flick coasts and decays, and a touch catches it — the two behaviours that make a scroll
+surface feel alive on iOS.
+
+The decay is applied **per millisecond**, not per frame, at `0.998` — UIScrollView's normal
+deceleration rate, giving roughly a 1.5-second glide. A per-frame decay would send the same
+flick further on a faster device. Frame deltas are clamped to 50 ms so a hitch cannot
+teleport the map, and if the camera stops moving because it is pinned against a map
+boundary the glide is dropped rather than ground out against the edge.
+
+### Placing buildings
+
+The awkward part of building placement on a touchscreen is that the engine's model — press
+to anchor, drag to set the facing, release to commit — assumes a pointer that was already
+hovering over the battlefield before you pressed anything. Touch has no hover.
+
+So placement is re-mapped rather than re-implemented, which means the engine's own
+placement arrow, wall-run preview and validation all still work unchanged:
+
+- **Carrying** sends cursor movement with no button held, so the engine leaves the
+  placement un-anchored and simply draws the ghost wherever the cursor is.
+- **Tapping the second finger** presses the left button, which *is* what puts the engine
+  into angle mode. The placement arrow appearing is your feedback that rotation is live.
+  Tapping again un-anchors and hands the structure back to your finger.
+- **Holding the second finger** cancels. It never presses anything, so there is no held
+  button to unwind and no stray click to leak into the world.
+
+Three details that only matter once you actually use it:
+
+- **The ghost appears in the middle of the view**, not at your last tap. With a mouse the
+  pointer is already out over the map when you click a build button; on touch the cursor is
+  sitting on the command bar you just pressed, so a new ghost used to appear down in the
+  corner.
+- **Rotation ignores the first ~10 mm.** When rotation switches on, your finger is sitting
+  exactly on the anchor, and the facing is derived from anchor→cursor — so without a dead
+  circle the building spins wildly on sub-millimetre movement.
+- **The edge-scroll band is sized for a fingertip** (a twentieth of the screen height)
+  rather than the engine's 3 pixels, which is about a millimetre on a modern display and
+  also collides with iOS's own edge-swipe gestures. It is active only while placing, since
+  the rest of the time two-finger pan already covers moving the map.
+
+### Haptics
+
+A light tap when rotation engages, a medium one when a structure is placed, a heavier one
+when a build is cancelled. Timed gestures in particular have no physical affordance —
+nothing depresses — so a haptic is the only way to tell a deliberate mode change from a
+misfire.
+
+iPhone only in effect, but not in code: `UIImpactFeedbackGenerator` is simply inert on
+hardware without a Taptic Engine, which includes every iPad, so no device check is needed.
+
+### Known rough edges
+
+- **Haptics are unverified.** They were developed on an iPad, which has no Taptic Engine,
+  so they have never actually fired. They link and the call sites are right; that is all
+  that is currently known.
+- **Rotating walls is untested.** Line-build templates (walls, gates) treat anchor→cursor
+  as a *run* rather than an angle, so rotation mode on a wall will sweep its endpoint
+  around a circle rather than extend it. That may be wrong for walls specifically.
+- **A resting finger does not stop a coasting map** — only a tap or a new pan does. The
+  touch layer sends no button until a gesture commits, so there is nothing to signal a
+  finger merely being parked.
 
 ## What this port actually involved
 
