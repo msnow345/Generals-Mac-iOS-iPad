@@ -29,7 +29,10 @@
 //						with to interact with the game windowing system.
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+#include "PreRTS.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif	// This must go first in EVERY cpp file in the GameEngine
 
 #include <stdio.h>
 
@@ -243,8 +246,40 @@ void GameWindowManager::update()
 
 	// Process windows waiting to be destroyed
 	processDestroyList();
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @bugfix Claude 31/08/2026 Step menu transitions on time, not per frame.
+	//
+	// GameWindowTransitionsHandler::update() advances its transition one step per CALL, and
+	// this runs once per render frame -- so uncapping the in-game frame rate ran every menu
+	// animation at four times speed. The destroy list above still runs every frame; only the
+	// animation is paced.
+	//
+	// Catch-up is capped at one step: after a stall, replaying the backlog would make the
+	// animation lurch rather than resume.
+	if(TheTransitionHandler)
+	{
+		static UnsignedInt s_lastMs = 0;
+		static Real s_accumMs = 0.0f;
+		const UnsignedInt nowMs = timeGetTime();
+		if (s_lastMs == 0)
+			s_lastMs = nowMs;
+		s_accumMs += (Real)(nowMs - s_lastMs);
+		s_lastMs = nowMs;
+
+		const Real stepMs = 1000.0f / (Real)LOGICFRAMES_PER_SECOND;
+		if (s_accumMs >= stepMs)
+		{
+			if (s_accumMs > stepMs * 2.0f)
+				s_accumMs = stepMs;
+			s_accumMs -= stepMs;
+			TheTransitionHandler->update();
+		}
+	}
+#else
 	if(TheTransitionHandler)
 		TheTransitionHandler->update();
+#endif
 }
 
 //-------------------------------------------------------------------------------------------------

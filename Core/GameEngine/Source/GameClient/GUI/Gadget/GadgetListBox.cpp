@@ -47,7 +47,10 @@
 // SYSTEM INCLUDES ////////////////////////////////////////////////////////////
 
 // USER INCLUDES //////////////////////////////////////////////////////////////
-#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+#include "PreRTS.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif	// This must go first in EVERY cpp file in the GameEngine
 
 #include "Common/AudioEventRTS.h"
 #include "Common/Language.h"
@@ -541,6 +544,80 @@ static Int addEntry( UnicodeString *string, Int color, Int row, Int column, Game
 // PUBLIC FUNCTIONS ///////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+// GeneralsX @feature Claude 31/08/2026 Drag the list itself to scroll it.
+//
+// The stock listbox scrolls only via its scrollbar, whose thumb is a few pixels wide at this
+// resolution -- fine with a mouse, unusable with a fingertip. On touch, dragging anywhere in
+// the body should scroll and a tap should still select, which is how every iOS list behaves.
+//
+// displayPos is a PIXEL offset (not an entry index), so the drag is tracked 1:1 rather than
+// snapped to whole rows.
+static GameWindow *s_dragList = nullptr;
+static Int s_dragStartY = 0;
+static Int s_dragStartPos = 0;
+static Bool s_dragHasRef = FALSE;
+static Bool s_dragScrolled = FALSE;
+
+// Scroll extent, mirroring the maxVal computation in adjustDisplay().
+static Int gxListboxMaxScroll( ListboxData *list )
+{
+	Int maxVal = list->totalHeight - ( list->displayHeight - TOTAL_OUTLINE_HEIGHT ) + 1;
+	return (maxVal < 0) ? 0 : maxVal;
+}
+
+static void gxListboxScrollTo( ListboxData *list, Int newPos )
+{
+	const Int maxVal = gxListboxMaxScroll( list );
+	if( newPos < 0 )
+		newPos = 0;
+	else if( newPos > maxVal )
+		newPos = maxVal;
+
+	list->displayPos = newPos;
+
+	// Keep the scrollbar thumb in step, driven inverted exactly as adjustDisplay() does it,
+	// so the thumb tracks the drag instead of sitting still while the list moves.
+	if( list->slider != nullptr )
+		TheWindowManager->winSendSystemMsg( list->slider, GSM_SET_SLIDER,
+																				(maxVal - newPos), 0 );
+}
+
+// Returns TRUE if the drag consumed the gesture, so the caller suppresses selection.
+static Bool gxListboxDragScroll( GameWindow *window, ListboxData *list, Int mouseY )
+{
+	if( list == nullptr || gxListboxMaxScroll( list ) <= 0 )
+		return FALSE;
+
+	// Baseline on the first drag rather than on the press. The touch layer only synthesises a
+	// button-down once its own dead zone is passed, so the press position is already stale by
+	// tens of pixels; anchoring here keeps the list under the finger instead of jumping.
+	if( s_dragList != window || !s_dragHasRef )
+	{
+		s_dragList = window;
+		s_dragStartY = mouseY;
+		s_dragStartPos = list->displayPos;
+		s_dragHasRef = TRUE;
+		s_dragScrolled = TRUE;
+		return TRUE;
+	}
+
+	// Content follows the finger: dragging up reveals later entries.
+	gxListboxScrollTo( list, s_dragStartPos + (s_dragStartY - mouseY) );
+	return TRUE;
+}
+
+// Consume the release if the gesture turned into a scroll.
+static Bool gxListboxDragConsumedRelease( GameWindow *window )
+{
+	const Bool consumed = (s_dragScrolled && s_dragList == window);
+	s_dragList = nullptr;
+	s_dragHasRef = FALSE;
+	s_dragScrolled = FALSE;
+	return consumed;
+}
+#endif
+
 // GadgetListBoxInput =========================================================
 /** Handle input for list box */
 //=============================================================================
@@ -785,6 +862,11 @@ WindowMsgHandledType GadgetListBoxInput( GameWindow *window, UnsignedInt msg,
 		// ------------------------------------------------------------------------
 		case GWM_LEFT_UP:
 		{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// A drag scrolls; only a tap selects.
+			if( gxListboxDragConsumedRelease( window ) )
+				return MSG_HANDLED;
+#endif
 			TheWindowManager->winSetFocus( window );
 //			Int mousex = mData1 & 0xFFFF;
 			Int mousey = mData1 >> 16;
@@ -956,6 +1038,11 @@ WindowMsgHandledType GadgetListBoxInput( GameWindow *window, UnsignedInt msg,
 		// ------------------------------------------------------------------------
 		case GWM_LEFT_DRAG:
 
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			if( gxListboxDragScroll( window, list, (Int)(mData1 >> 16) ) )
+				return MSG_HANDLED;
+#endif
+
 			if (BitIsSet( instData->getStyle(), GWS_MOUSE_TRACK ) )
 				TheWindowManager->winSendSystemMsg( window->winGetOwner(),
 																						GGM_LEFT_DRAG,
@@ -966,6 +1053,13 @@ WindowMsgHandledType GadgetListBoxInput( GameWindow *window, UnsignedInt msg,
 		// ------------------------------------------------------------------------
 		case GWM_LEFT_DOWN:
 			doAudioFeedback(window);
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// Arm a possible drag. Nothing scrolls yet -- a press that never moves must still
+			// select normally.
+			s_dragList = window;
+			s_dragHasRef = FALSE;
+			s_dragScrolled = FALSE;
+#endif
 			// we want to eat the down... so we may receive the up.
 			return MSG_HANDLED;
 
@@ -1015,6 +1109,11 @@ WindowMsgHandledType GadgetListBoxMultiInput( GameWindow *window, UnsignedInt ms
 		case GWM_LEFT_UP:
 		//case GWM_LEFT_CLICK:
 		{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// A drag scrolls; only a tap selects.
+			if( gxListboxDragConsumedRelease( window ) )
+				return MSG_HANDLED;
+#endif
 			TheWindowManager->winSetFocus( window );
 //			Int *selections = list->selections;
 			Int selectPos = -2;
@@ -1234,6 +1333,11 @@ WindowMsgHandledType GadgetListBoxMultiInput( GameWindow *window, UnsignedInt ms
 		// ------------------------------------------------------------------------
 		case GWM_LEFT_DRAG:
 
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			if( gxListboxDragScroll( window, list, (Int)(mData1 >> 16) ) )
+				return MSG_HANDLED;
+#endif
+
 			if (BitIsSet( instData->getStyle(), GWS_MOUSE_TRACK ) )
 				TheWindowManager->winSendSystemMsg( window->winGetOwner(),
 																						GGM_LEFT_DRAG,
@@ -1244,6 +1348,13 @@ WindowMsgHandledType GadgetListBoxMultiInput( GameWindow *window, UnsignedInt ms
 		// ------------------------------------------------------------------------
 		case GWM_LEFT_DOWN:
 			doAudioFeedback(window);
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// Arm a possible drag. Nothing scrolls yet -- a press that never moves must still
+			// select normally.
+			s_dragList = window;
+			s_dragHasRef = FALSE;
+			s_dragScrolled = FALSE;
+#endif
 			// we want to eat the down... so we may receive the up.
 			return MSG_HANDLED;
 

@@ -51,7 +51,10 @@
 //-----------------------------------------------------------------------------
 // USER INCLUDES //////////////////////////////////////////////////////////////
 //-----------------------------------------------------------------------------
-#include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+#include "PreRTS.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif	// This must go first in EVERY cpp file in the GameEngine
 
 #include "GameClient/AnimateWindowManager.h"
 #include "GameClient/GameWindow.h"
@@ -121,6 +124,8 @@ static void clearWinList(AnimateWindowList &winList)
 
 AnimateWindowManager::AnimateWindowManager()
 {
+	m_lastUpdateMs = 0;
+	m_stepAccumMs = 0.0f;
 // we don't allocate many of these, so no MemoryPools used
 	m_slideFromRight = NEW ProcessAnimateWindowSlideFromRight;
 	m_slideFromRightFast = NEW ProcessAnimateWindowSlideFromRightFast;
@@ -172,6 +177,35 @@ void AnimateWindowManager::reset()
 
 void AnimateWindowManager::update()
 {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @bugfix Claude 31/08/2026 Step window slides on time, not per frame.
+	//
+	// The ProcessAnimateWindow steps advance position by a fixed velocity PER CALL
+	// (curPos.y += vel.y), and this runs once per render frame -- so uncapping the in-game
+	// frame rate to 120 made the control bar and every other sliding window travel four times
+	// too fast. Their start delays are already time-based (they compare against timeGetTime),
+	// so only the motion was frame-coupled.
+	//
+	// Paced to the engine's design rate here rather than scaling the velocities, because the
+	// velocity and its slow-down ratio are tuned per animation style and per window; changing
+	// the step size would alter the easing, whereas changing the step RATE preserves it
+	// exactly. Catch-up is capped at one step so a stall resumes rather than lurching.
+	{
+		const UnsignedInt nowMs = timeGetTime();
+		if (m_lastUpdateMs == 0)
+			m_lastUpdateMs = nowMs;
+		m_stepAccumMs += (Real)(nowMs - m_lastUpdateMs);
+		m_lastUpdateMs = nowMs;
+
+		const Real stepMs = 1000.0f / (Real)LOGICFRAMES_PER_SECOND;
+		if (m_stepAccumMs < stepMs)
+			return;
+		if (m_stepAccumMs > stepMs * 2.0f)
+			m_stepAccumMs = stepMs;
+		m_stepAccumMs -= stepMs;
+	}
+#endif
+
 
 	ProcessAnimateWindow *processAnim = nullptr;
 

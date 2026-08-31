@@ -51,6 +51,9 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#include <chrono>
+#endif
 #include "GameLogic/Module/UpdateModule.h"
 #include "GameLogic/GameLogic.h"
 
@@ -106,15 +109,126 @@ static Mouse::MouseCursor prevCursor = Mouse::ARROW;
 // roughly a 1.5s coast), which is what makes it read as native rather than merely damped.
 static Coord2D s_panVelocity = { 0.0f, 0.0f };
 static Bool s_panGliding = false;
-static UnsignedInt s_panLastMsec = 0;
+static double s_panLastMsec = 0.0;
 
 static const Real PAN_DECAY_PER_MS   = 0.998f;
-static const Real PAN_MIN_FLICK      = 0.15f;  // units/ms below which a release is not a flick
-static const Real PAN_MIN_GLIDE      = 0.02f;  // units/ms at which the coast is spent
-static const UnsignedInt PAN_MAX_DT  = 50;     // clamp, so a frame hitch cannot teleport the map
+// GeneralsX @tweak Claude 31/08/2026 If the camera was moving, it coasts. No cliff.
+//
+// These two express one rule: arm a glide whenever the camera was actually moving at release,
+// and end it when it is no longer moving perceptibly. They are therefore set as low as is
+// useful and only just apart -- FLICK marginally above GLIDE, so arming always buys at least
+// one real step.
+//
+// They were 0.15 and 0.02, which made the first a gate rather than a floor: releases below
+// 0.15 got nothing at all, and releases just above it decayed to 0.02 within ~280ms having
+// travelled about 7 world units, which is invisible. That left the entire gentle-release band
+// feeling like a dead stop. With these values, coast distance is (v0 - GLIDE) / decay rate --
+// linear in release speed all the way down, so a slow drag ends with a small drift and a hard
+// flick still runs the length of the map.
+static const Real PAN_MIN_FLICK      = 0.006f; // units/ms; a release slower than this was a stop
+static const Real PAN_MIN_GLIDE      = 0.005f; // units/ms at which the coast is spent
+static const double PAN_MAX_DT      = 50.0;   // ms clamp, so a frame hitch cannot teleport the map
+
+// GeneralsX @tweak Claude 31/08/2026 Compounding flicks.
+// UIScrollView adds a new flick's velocity to whatever is left of the previous one, which is
+// why repeatedly swiping a long list accelerates instead of restarting at the same speed each
+// time. Catching the content still cancels the motion -- the residual is only carried if the
+// next flick follows soon after and pushes the same way, so a deliberate stop stays a stop.
+// Velocity is measured over a real time window from position samples, the way
+// UIPanGestureRecognizer does it, rather than smoothed per frame. A fixed-alpha filter has a
+// frame-rate dependent time constant and lags -- and since people ease off slightly as they
+// lift, that lag systematically under-reports the flick, which is exactly the speed that
+// matters. Sampling the last ~100ms of travel measures what the hand actually did.
+// GeneralsX @bugfix Claude 31/08/2026 Sub-millisecond clock for touch motion.
+// timeGetTime() returns whole milliseconds. At 120Hz a frame is 8.33ms, so dt comes back as
+// 8,8,9,8,9... -- a persistent 6% jitter in every glide step, which reads as stutter however
+// even the real frame pacing is. Accurate dt is exactly what makes uneven frames look smooth;
+// quantised dt makes even frames look uneven, so the smoother the display the worse it got.
+static double gxNowMs()
+{
+	return (double)std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+}
+
+struct PanSample { double msec; Real x; Real y; };
+static const Int PAN_SAMPLE_COUNT = 16;
+static PanSample s_panSamples[PAN_SAMPLE_COUNT];
+static Int s_panSampleNext = 0;
+static Int s_panSamplesHeld = 0;
+static Coord2D s_panTravel = { 0.0f, 0.0f };
+// GeneralsX @tweak Claude 31/08/2026 Measured over the tail of the gesture, not all of it.
+// 100ms is UIKit's rough figure, but at 120fps that is a dozen frames -- and people ease off
+// as they lift, so a flat average over that much of the tail lets the deceleration outweigh
+// the throw and a real flick reads as a stop. A shorter window tracks the speed the hand
+// actually left at, while still averaging enough frames to reject noise.
+static const UnsignedInt PAN_VELOCITY_WINDOW_MS = 60;
+
+static void gxPanSamplesReset()
+{
+	s_panSampleNext = 0;
+	s_panSamplesHeld = 0;
+	s_panTravel.x = s_panTravel.y = 0.0f;
+}
+
+static void gxPanSampleAdd(const Coord2D &worldDelta, double nowMsec)
+{
+	s_panTravel.x += worldDelta.x;
+	s_panTravel.y += worldDelta.y;
+	s_panSamples[s_panSampleNext].msec = nowMsec;
+	s_panSamples[s_panSampleNext].x = s_panTravel.x;
+	s_panSamples[s_panSampleNext].y = s_panTravel.y;
+	s_panSampleNext = (s_panSampleNext + 1) % PAN_SAMPLE_COUNT;
+	if (s_panSamplesHeld < PAN_SAMPLE_COUNT)
+		++s_panSamplesHeld;
+}
+
+// Average velocity over the newest samples spanning up to the window, in units/ms.
+static Coord2D gxPanSampledVelocity(double nowMsec)
+{
+	Coord2D v = { 0.0f, 0.0f };
+	if (s_panSamplesHeld < 2)
+		return v;
+
+	const Int newest = (s_panSampleNext - 1 + PAN_SAMPLE_COUNT) % PAN_SAMPLE_COUNT;
+	Int oldest = newest;
+	for (Int i = 1; i < s_panSamplesHeld; ++i)
+	{
+		const Int idx = (s_panSampleNext - 1 - i + 2 * PAN_SAMPLE_COUNT) % PAN_SAMPLE_COUNT;
+		if (nowMsec - s_panSamples[idx].msec > (double)PAN_VELOCITY_WINDOW_MS)
+			break;
+		oldest = idx;
+	}
+
+	const double span = s_panSamples[newest].msec - s_panSamples[oldest].msec;
+	if (span <= 0.0)
+		return v;
+
+	v.x = (Real)((s_panSamples[newest].x - s_panSamples[oldest].x) / span);
+	v.y = (Real)((s_panSamples[newest].y - s_panSamples[oldest].y) / span);
+	return v;
+}
+
+static Coord2D s_panCarryVelocity = { 0.0f, 0.0f };
+static double s_panCarryMsec = 0.0;
+static const UnsignedInt PAN_CARRY_WINDOW_MS = 300;
+static const Real PAN_CARRY_MAX_FACTOR = 3.0f;   // ceiling, so compounding cannot run away
+
+// True while a flick is still worth building on. Used to skip gesture re-recognition, so a
+// follow-up flick does not lose its opening travel to the dead zone -- UIScrollView captures
+// immediately when you touch during deceleration, with no slop to re-cross.
+Bool GX_PanFlickIsRecent()
+{
+	return (s_panCarryMsec != 0.0) && ((gxNowMs() - s_panCarryMsec) < (double)PAN_CARRY_WINDOW_MS);
+}
 
 void GX_StopPanGlide()
 {
+	// Remember what the coast still had in it, so a follow-up flick can build on it.
+	if (s_panGliding)
+	{
+		s_panCarryVelocity = s_panVelocity;
+		s_panCarryMsec = gxNowMs();
+	}
 	s_panGliding = false;
 	s_panVelocity.x = s_panVelocity.y = 0.0f;
 }
@@ -141,6 +255,29 @@ static Bool s_touchActive = false;
 // projections are taken before the zoom, with the camera that is actually current.
 static Real s_pendingZoomRatio = 1.0f;
 
+// GeneralsX @tweak Claude 31/08/2026 Zoom response damping.
+// Scaling camera height by 1/ratio is 1:1 only if the visible ground span is proportional to
+// that height. Under this game's tilted camera it is not quite -- the pitch means a given
+// height change covers more ground than a flat overhead view would -- so an undamped pinch
+// zooms further than the fingers travelled. Applied as an exponent rather than a multiplier
+// so the response stays multiplicative: pinching in and back out returns to the same zoom
+// instead of drifting. Lower is less sensitive; 1.0 restores the raw geometric mapping.
+static const Real TOUCH_ZOOM_GAIN = 0.65f;
+
+// GeneralsX @bugfix Claude 31/08/2026 Smooth the zoom anchor offset.
+// screenToTerrain raycasts the terrain MESH, so the world offset between the pinch point and
+// the screen centre depends on the elevation under each -- and lurches whenever a ray crosses
+// a slope, a cliff edge or a building. Measured on device, consecutive frames of a smooth
+// pinch produced offsets of (44,78), (-31,104), (107,216): multiplying that by the height
+// change turns terrain relief directly into visible jitter.
+//
+// The true offset changes slowly, so filtering it costs nothing perceptible while rejecting
+// both the noise and the occasional badly-missed raycast. Reset when the fingers lift so a
+// new gesture starts from its own geometry rather than the last one's.
+static Coord2D s_zoomAnchorOffset = { 0.0f, 0.0f };
+static Bool s_zoomAnchorOffsetValid = false;
+static const Real ZOOM_OFFSET_SMOOTHING = 0.35f;
+
 static Bool gxTerrainHit(const Coord3D &c)
 {
 	// screenToTerrain leaves its output all-zero when the pick ray misses the terrain.
@@ -158,6 +295,10 @@ void GX_AccumulateTouchZoom(Real ratio)
 void GX_SetTouchActive(Bool active)
 {
 	s_touchActive = active;
+	if (!active)
+	{
+		s_zoomAnchorOffsetValid = false;
+	}
 }
 #endif
 
@@ -168,6 +309,8 @@ void LookAtTranslator::setScrolling(ScrollType scrollType)
 		return;
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	gxPanSamplesReset();
+
 	// A new scroll supersedes any coast in progress.
 	// Deliberately NOT keyed off mouse motion: ending a pan emits a position message of its
 	// own at the release point, so a motion-based rule cancelled the flick it had just
@@ -190,12 +333,21 @@ void LookAtTranslator::stopScrolling()
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 	// GeneralsX @tweak Claude 31/08/2026 Let a flick coast. Below the threshold the finger
 	// was effectively parked, and coasting from that reads as drift rather than momentum.
-	const Real speed = (Real)sqrt(s_panVelocity.x * s_panVelocity.x + s_panVelocity.y * s_panVelocity.y);
+	s_panVelocity = gxPanSampledVelocity(gxNowMs());
+	Real speed = (Real)sqrt(s_panVelocity.x * s_panVelocity.x + s_panVelocity.y * s_panVelocity.y);
+
+	// GeneralsX @tweak Claude 31/08/2026 Flick velocities deliberately do NOT compound.
+	// UIScrollView adds them, but it renders at display rate; in-game we are GPU-bound at
+	// ~30fps, so a faster glide simply means larger jumps between frames. Compounding made
+	// repeated flicks measurably quicker and visibly choppier, which is the wrong trade.
+	// The carry timestamp is still kept -- it is what lets a follow-up flick skip gesture
+	// re-recognition, which is the part that genuinely helped.
+
 	s_panGliding = (m_scrollType == SCROLL_RMB) && (speed > PAN_MIN_FLICK);
 	if (!s_panGliding) {
 		s_panVelocity.x = s_panVelocity.y = 0.0f;
 	} else {
-		s_panLastMsec = timeGetTime();
+		s_panLastMsec = gxNowMs();
 	}
 #endif
 	m_isScrolling = false;
@@ -590,22 +742,43 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 				// takes a height delta, so scaling height by 1/ratio keeps the gesture
 				// proportional at every zoom level instead of stepping.
 				const Real heightBefore = TheTacticalView->getHeightAboveGround();
-				TheTacticalView->userZoom(heightBefore * (1.0f / ratio - 1.0f));
+				const Real scale = (Real)pow((double)(1.0f / ratio), (double)TOUCH_ZOOM_GAIN);
+				TheTacticalView->userZoom(heightBefore * (scale - 1.0f));
 				const Real heightAfter = TheTacticalView->getHeightAboveGround();
 
-				// Use the ratio actually achieved, not the one requested: the engine clamps
-				// height at its zoom limits, and correcting for a zoom that did not happen
-				// would drag the map sideways at the ends of the range.
-				if (canAnchor && heightAfter > 0.0f)
+				// Correct by the height change actually achieved, not the one requested: the
+				// engine clamps height at its zoom limits, and correcting for a zoom that did
+				// not happen would drag the map sideways at the ends of the range.
+				//
+				// Expressed as (before - after) / before rather than 1 - 1/(before/after).
+				// They are algebraically identical, but the latter divides two nearly equal
+				// numbers and then subtracts from one, which loses most of its significant
+				// digits per frame -- and that error is then multiplied by the distance from
+				// the screen centre, so it shows up as jitter that grows the further the
+				// pinch is from the middle.
+				const Real heightDelta = heightBefore - heightAfter;
+				if (canAnchor && heightBefore > 0.0f && WWMath::Fabs(heightDelta) > 0.001f)
 				{
-					const Real achieved = heightBefore / heightAfter;
-					if (achieved > 0.0f)
+					Coord2D rawOffset;
+					rawOffset.x = anchorWorld.x - centreWorld.x;
+					rawOffset.y = anchorWorld.y - centreWorld.y;
+
+					if (!s_zoomAnchorOffsetValid)
 					{
-						Coord2D shift;
-						shift.x = (anchorWorld.x - centreWorld.x) * (1.0f - 1.0f / achieved);
-						shift.y = (anchorWorld.y - centreWorld.y) * (1.0f - 1.0f / achieved);
-						TheTacticalView->userScrollByWorld(&shift);
+						s_zoomAnchorOffset = rawOffset;
+						s_zoomAnchorOffsetValid = true;
 					}
+					else
+					{
+						s_zoomAnchorOffset.x += (rawOffset.x - s_zoomAnchorOffset.x) * ZOOM_OFFSET_SMOOTHING;
+						s_zoomAnchorOffset.y += (rawOffset.y - s_zoomAnchorOffset.y) * ZOOM_OFFSET_SMOOTHING;
+					}
+
+					const Real k = heightDelta / heightBefore;
+					Coord2D shift;
+					shift.x = s_zoomAnchorOffset.x * k;
+					shift.y = s_zoomAnchorOffset.y * k;
+					TheTacticalView->userScrollByWorld(&shift);
 				}
 			}
 
@@ -689,20 +862,9 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 							worldDelta.x = prevWorld.x - curWorld.x;
 							worldDelta.y = prevWorld.y - curWorld.y;
 							TheTacticalView->userScrollByWorld(&worldDelta);
-							// Smooth into a velocity so a flick carries the gesture's overall
-							// speed rather than whatever the final frame happened to catch,
-							// which is at its noisiest just as the finger leaves.
-							const UnsignedInt nowMsec = timeGetTime();
-							UnsignedInt dt = nowMsec - s_panLastMsec;
-							if (dt > PAN_MAX_DT) dt = PAN_MAX_DT;
-							s_panLastMsec = nowMsec;
-							if (dt > 0)
-							{
-								const Real blend = 0.3f;
-								const Real invDt = 1.0f / (Real)dt;
-								s_panVelocity.x = s_panVelocity.x * (1.0f - blend) + (worldDelta.x * invDt) * blend;
-								s_panVelocity.y = s_panVelocity.y * (1.0f - blend) + (worldDelta.y * invDt) * blend;
-							}
+							// Record travel against real time; the release reads velocity back
+							// over a fixed window rather than trusting any single frame.
+							gxPanSampleAdd(worldDelta, gxNowMs());
 						}
 						m_lastScrollPos = m_currentPos;
 #else
@@ -790,12 +952,13 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 					// millisecond, so the curve is identical at any frame rate. If the view
 					// did not actually move, the camera is pinned against a map edge, so drop
 					// the glide rather than grind on it for the rest of the decay.
-					const UnsignedInt nowMsec = timeGetTime();
-					UnsignedInt dt = nowMsec - s_panLastMsec;
+					const double nowMsec = gxNowMs();
+					double dt = nowMsec - s_panLastMsec;
 					if (dt > PAN_MAX_DT) dt = PAN_MAX_DT;
+					if (dt < 0.0) dt = 0.0;
 					s_panLastMsec = nowMsec;
 
-					if (dt > 0)
+					if (dt > 0.0)
 					{
 						Coord2D step;
 						step.x = s_panVelocity.x * (Real)dt;
@@ -807,14 +970,29 @@ GameMessageDisposition LookAtTranslator::translateGameMessage(const GameMessage 
 						const Real movedSq = (after.x - before.x) * (after.x - before.x) +
 						                     (after.y - before.y) * (after.y - before.y);
 
-						const Real decay = (Real)pow((double)PAN_DECAY_PER_MS, (double)dt);
+						const Real decay = (Real)pow((double)PAN_DECAY_PER_MS, dt);
 						s_panVelocity.x *= decay;
 						s_panVelocity.y *= decay;
 						const Real speed = (Real)sqrt(s_panVelocity.x * s_panVelocity.x +
 						                              s_panVelocity.y * s_panVelocity.y);
-						if (speed < PAN_MIN_GLIDE || movedSq < 0.0001f)
+						// GeneralsX @bugfix Claude 31/08/2026 Judge "pinned" relative to the step.
+						//
+						// This compared movement against a FIXED threshold, so a frame with
+						// almost no elapsed time -- which asks the camera to move almost
+						// nothing and therefore moves almost nothing -- looked identical to a
+						// camera jammed against the map edge. The first glide frame lands in
+						// the same frame the release armed it, so dt is ~0 and every single
+						// flick was killed on frame one, before it had decayed at all.
+						//
+						// Comparing against the distance actually requested tells the two
+						// apart: genuinely pinned means "asked to move a real distance and did
+						// not", which a zero-length step can never satisfy.
+						const Real asked = (Real)sqrt(step.x * step.x + step.y * step.y);
+						const Bool pinned = (asked > 0.05f) && (sqrt(movedSq) < asked * 0.25f);
+						if (speed < PAN_MIN_GLIDE || pinned)
 						{
-							GX_StopPanGlide();
+							s_panGliding = false;
+							s_panVelocity.x = s_panVelocity.y = 0.0f;
 						}
 					}
 				}

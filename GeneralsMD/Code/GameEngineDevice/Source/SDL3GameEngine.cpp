@@ -204,7 +204,9 @@ struct TouchState {
 	float panX = 0.0f, panY = 0.0f;     // pan centroid
 	float twoStartX = 0.0f, twoStartY = 0.0f;
 	float twoStartDist = 0.0f;
-	float pinchDist = 0.0f;             // finger distance at last wheel step
+	float pinchDist = 0.0f;             // reference finger distance for the zoom
+	bool zoomActive = false;            // pinch has passed its activation threshold
+	float zoomRefX = 0.0f, zoomRefY = 0.0f; // centroid when the pinch reference was taken
 	Uint64 downTicks = 0;
 	float placeAnchorX = 0.0f, placeAnchorY = 0.0f; // anchor the engine is rotating about
 	Uint64 armedTicks = 0;              // when the 2nd finger landed
@@ -221,6 +223,17 @@ const Uint64 LONG_PRESS_MS = 600;
 const float MIN_TOUCH_DEAD_ZONE_PX = 8.0f;  // low-density floor for tap/pan/pinch jitter
 const float TOUCH_DEAD_ZONE_MM = 3.0f;
 const float SDL_BASE_POINTS_PER_MM = 160.0f / 25.4f;
+// Finger-distance noise below this is not zoom. Small enough that a deliberate pinch feels
+// immediate, large enough that two fingers dragging in parallel do not creep the camera.
+const float PINCH_DEADBAND = 0.004f;
+// How far the fingers must change separation before zoom engages at all. Two fingers dragging
+// in parallel never stay exactly parallel, so without an activation distance that incidental
+// divergence leaks in as zoom on almost every pan.
+const float ZOOM_ACTIVATE_MM = 6.0f;
+// A pinch must out-pace the pan to count. Fingers translating across the glass drift apart a
+// little; without this, a long enough pan eventually accumulates that drift into the
+// activation distance and zoom fires unasked, stalling the pan.
+const float ZOOM_VS_PAN_RATIO = 0.5f;
 // GeneralsX @tweak Claude 31/08/2026 Build-placement touch gesture.
 // One finger carries the structure. A second finger arms rotation but deliberately sends
 // NOTHING yet: twisting commits to rotate, holding both still cancels the build. Arming
@@ -259,6 +272,11 @@ float getTouchDeadZonePx(SDL_Window *window)
 	}
 
 	return deadZonePx;
+}
+
+float getZoomActivatePx(SDL_Window *window)
+{
+	return getTouchDeadZonePx(window) * (ZOOM_ACTIVATE_MM / TOUCH_DEAD_ZONE_MM);
 }
 
 float getPlaceRotateRadiusPx(SDL_Window *window)
@@ -351,10 +369,23 @@ void sendPlaceRotateCursor(SDL3Mouse *mouse, SDL_Window *window, float px, float
 	}
 }
 
-void beginPan(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
+// GeneralsX @tweak Claude 31/08/2026 Two fingers pan and zoom together.
+// These used to be mutually exclusive: whichever moved further first won, and the gesture was
+// locked to it until the fingers lifted -- so once you started dragging you could not pinch
+// without letting go, which is what made the two feel like they fought each other. Every
+// native map surface does both at once, and there is no longer a reason not to: the pan is
+// world-space and the zoom is continuous, so they compose cleanly.
+void beginTwoFingerGesture(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
 {
 	s_touch.panX = getCentroidX(winW);
 	s_touch.panY = getCentroidY(winH);
+	// Re-reference the pinch here so the spread that occurred while the gesture was still
+	// being recognised does not land as one lurch of zoom on the first frame. Zoom then stays
+	// dormant until the fingers deliberately change separation (see handlePinch).
+	s_touch.pinchDist = getFingerDistance(winW, winH);
+	s_touch.zoomActive = false;
+	s_touch.zoomRefX = s_touch.panX;
+	s_touch.zoomRefY = s_touch.panY;
 	sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.panX, s_touch.panY);
 	sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
 	                   s_touch.panX, s_touch.panY, SDL_BUTTON_RIGHT);
@@ -377,20 +408,57 @@ void beginTwoFingerPending(int winW, int winH)
 // fixed steps about the screen centre -- the one obviously non-native thing left once the
 // pan became 1:1. The distance ratio is now passed through whole, and the cursor is parked
 // on the pinch centre so the engine can anchor the zoom there (see GX_AccumulateTouchZoom).
-void handlePinch(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
+// The caller parks the cursor between the fingers, which is what the engine anchors the zoom
+// on, so this only has to produce the ratio.
+//
+// Below the deadband nothing is consumed AND the reference distance is left alone, so finger
+// jitter during a pure pan cannot creep the zoom, while a slow deliberate pinch keeps
+// accumulating until it crosses and then applies in full.
+void handlePinch(SDL_Window *window, int winW, int winH)
 {
 	const float dist = getFingerDistance(winW, winH);
-	if (s_touch.pinchDist > 1.0f && dist > 1.0f) {
-		const float ratio = dist / s_touch.pinchDist;
-		s_touch.pinchDist = dist;
-
-		// Put the cursor between the fingers first: the engine anchors the zoom on the
-		// ground under the cursor, and this message is processed before the frame tick that
-		// consumes the ratio.
-		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION,
-		                   getCentroidX(winW), getCentroidY(winH));
-		GX_AccumulateTouchZoom((Real)ratio);
+	if (s_touch.pinchDist <= 1.0f || dist <= 1.0f) {
+		return;
 	}
+
+	// Modelled on how UIKit recognisers behave: stay dormant until an activation threshold is
+	// crossed, then report movement measured FROM that moment. Re-referencing on activation is
+	// the part that matters -- without it the separation drift accumulated while deciding gets
+	// applied in one lump, which is what made a plain two-finger pan nudge the zoom every time.
+	if (!s_touch.zoomActive) {
+		const float activatePx = getZoomActivatePx(window);
+		const float sepChange = SDL_fabsf(dist - s_touch.pinchDist);
+		const float panDx = getCentroidX(winW) - s_touch.zoomRefX;
+		const float panDy = getCentroidY(winH) - s_touch.zoomRefY;
+		const float panTravel = SDL_sqrtf(panDx * panDx + panDy * panDy);
+
+		// The separation has to change faster than the fingers are travelling. A genuine
+		// pinch easily clears this; fingers sliding across the glass together do not.
+		if (sepChange >= activatePx && sepChange >= panTravel * ZOOM_VS_PAN_RATIO) {
+			s_touch.zoomActive = true;
+			s_touch.pinchDist = dist;
+			s_touch.zoomRefX = getCentroidX(winW);
+			s_touch.zoomRefY = getCentroidY(winH);
+			return;
+		}
+
+		// Still panning: re-take the reference so incidental drift cannot accumulate across a
+		// long drag and trip the threshold on its own. This is what stops a zoom arriving
+		// unbidden mid-pan and stalling it.
+		if (panTravel >= activatePx) {
+			s_touch.pinchDist = dist;
+			s_touch.zoomRefX = getCentroidX(winW);
+			s_touch.zoomRefY = getCentroidY(winH);
+		}
+		return;
+	}
+
+	const float ratio = dist / s_touch.pinchDist;
+	if (SDL_fabsf(ratio - 1.0f) < PINCH_DEADBAND) {
+		return;
+	}
+	s_touch.pinchDist = dist;
+	GX_AccumulateTouchZoom((Real)ratio);
 }
 
 void classifyTwoFingerGesture(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
@@ -403,19 +471,14 @@ void classifyTwoFingerGesture(SDL3Mouse *mouse, SDL_Window *window, int winW, in
 	const float panTravel = SDL_sqrtf(panDx * panDx + panDy * panDy);
 	const float pinchTravel = SDL_fabsf(dist - s_touch.twoStartDist);
 	const float threshold = getTouchDeadZonePx(window);
-	const bool panReady = panTravel >= threshold;
-	const bool pinchReady = pinchTravel >= threshold;
 
-	if (!panReady && !pinchReady) {
+	// Either kind of movement starts the gesture; from then on both are live. No choice is
+	// made here, so there is no wrong choice to be stuck with.
+	if (panTravel < threshold && pinchTravel < threshold) {
 		return;
 	}
 
-	if (panReady && (!pinchReady || panTravel >= pinchTravel)) {
-		beginPan(mouse, window, winW, winH);
-	} else {
-		s_touch.phase = TouchState::PINCH;
-		handlePinch(mouse, window, winW, winH);
-	}
+	beginTwoFingerGesture(mouse, window, winW, winH);
 }
 
 void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &event)
@@ -482,12 +545,21 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
 		}
 		else if (s_touch.phase == TouchState::PENDING) {
-			// Second finger before the first committed to anything: wait for
-			// physical movement to decide pan vs pinch, no left-click happened.
+			// Second finger before the first committed to anything.
 			s_touch.finger2 = event.tfinger.fingerID;
 			s_touch.f2x = event.tfinger.x;
 			s_touch.f2y = event.tfinger.y;
-			beginTwoFingerPending(winW, winH);
+			// GeneralsX @tweak Claude 31/08/2026 Follow-up flicks capture immediately.
+			// Normally the gesture waits out a dead zone to decide what it is. Landing on a
+			// map that is still coasting is unambiguous though -- it can only be a grab --
+			// and making it re-cross that threshold throws away the opening travel of every
+			// follow-up flick, which is what stopped repeated flicks feeling continuous.
+			// UIScrollView captures on touch during deceleration for the same reason.
+			if (GX_PanFlickIsRecent()) {
+				beginTwoFingerGesture(mouse, window, winW, winH);
+			} else {
+				beginTwoFingerPending(winW, winH);
+			}
 		}
 		else if (s_touch.phase == TouchState::DRAGGING) {
 			// Second finger during a live drag: finish the drag-box, then wait
@@ -557,14 +629,14 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			classifyTwoFingerGesture(mouse, window, winW, winH);
 		}
 		else if (s_touch.phase == TouchState::PAN) {
+			// The centroid drives the pan, and the cursor sitting there is also what the
+			// zoom anchors on, so one motion message serves both.
 			const float cx = getCentroidX(winW);
 			const float cy = getCentroidY(winH);
 			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, cx, cy);
 			s_touch.panX = cx;
 			s_touch.panY = cy;
-		}
-		else if (s_touch.phase == TouchState::PINCH) {
-			handlePinch(mouse, window, winW, winH);
+			handlePinch(window, winW, winH);
 		}
 		break;
 

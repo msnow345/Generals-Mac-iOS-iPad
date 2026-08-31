@@ -182,6 +182,9 @@ private:
 	AnimateWindowList m_winMustFinishList;			///< A list of AnimationWindows that we do care about
 	Bool m_needsUpdate;													///< If we're done animating all our monitored windows, then this will be false
 	Bool m_reverse;															///< Are we in a reverse state?
+	// GeneralsX @bugfix Claude 31/08/2026 Pacing state, so slides advance on time not per frame.
+	UnsignedInt m_lastUpdateMs;									///< when update() last stepped the animations
+	Real m_stepAccumMs;													///< unspent time toward the next step
 	ProcessAnimateWindowSlideFromRight *m_slideFromRight;			///< Holds the process in which the windows slide from the right
 	ProcessAnimateWindowSlideFromRightFast *m_slideFromRightFast;
 	ProcessAnimateWindowSlideFromTop *m_slideFromTop;					///< Holds the process in which the windows slide from the Top

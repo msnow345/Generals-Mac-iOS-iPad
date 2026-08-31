@@ -27,6 +27,9 @@
 // Author: Michael S. Booth, April 2001
 
 #include "PreRTS.h"	// This must go first in EVERY cpp file in the GameEngine
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "Common/ActionManager.h"
 #include "Common/AudioAffect.h"
@@ -960,6 +963,38 @@ DECLARE_PERF_TIMER(GameEngine_update)
 void GameEngine::update()
 {
 	USE_PERF_TIMER(GameEngine_update)
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	{
+		// GeneralsX @tweak Claude 31/08/2026 Uncap the in-game render rate on touch.
+		//
+		// The shipped 2003 GameData.ini caps rendering at 30fps. Setting that once at startup
+		// does not hold: GlobalData::parseGameDataDefinition() re-parses GameData.ini into a
+		// fresh override every time a map loads, and ScriptEngine::reset() then pushes that
+		// value back into the pacer -- which is why the menus ran at 120 while the game itself
+		// snapped back to exactly 30. It has to be re-asserted, so it is done here per frame.
+		//
+		// The shell stays at 30 deliberately. Menu and shell animations are client-side and
+		// advance once per RENDER frame rather than per logic frame, so raising the cap there
+		// runs them at 4x speed. Only the in-game camera benefits from the extra frames.
+		//
+		// Uncapping is only safe alongside the logic time scale: without it,
+		// canUpdateRegularGameLogic() returns true every render frame and the simulation ticks
+		// at the render rate, which is the classic Generals speed-up. With it, logic is driven
+		// by an accumulator at 30Hz and game speed is unchanged.
+		if (TheFramePacer != nullptr)
+		{
+			const Bool inShell = (TheGameLogic == nullptr) || TheGameLogic->isInShellGame() ||
+			                     !TheGameLogic->isInGame();
+			const Int wantFps = inShell ? 30 : 120;
+			if (TheFramePacer->getFramesPerSecondLimit() != wantFps)
+			{
+				TheFramePacer->setFramesPerSecondLimit(wantFps);
+			}
+			TheFramePacer->setLogicTimeScaleFps(LOGICFRAMES_PER_SECOND);
+			TheFramePacer->enableLogicTimeScale(wantFps > LOGICFRAMES_PER_SECOND);
+		}
+	}
+#endif
 	{
 		{
 			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.

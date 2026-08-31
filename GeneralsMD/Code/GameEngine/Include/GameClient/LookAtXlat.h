@@ -59,6 +59,10 @@ void GX_SetTouchActive(Bool active);
 // Applied on the next frame tick, anchored so the ground between the fingers stays put.
 // Ratios multiply, so several gesture updates inside one frame compose correctly.
 void GX_AccumulateTouchZoom(Real ratio);
+
+// True while a just-released flick is still worth building on. The touch layer uses this to
+// skip its recognition dead zone, so a follow-up flick keeps its opening travel.
+Bool GX_PanFlickIsRecent();
 #endif
 
 class LookAtTranslator : public GameMessageTranslator
